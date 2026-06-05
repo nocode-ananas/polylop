@@ -159,10 +159,10 @@ class OasisProfileGenerator:
         "ISTP", "ISFP", "ESTP", "ESFP"
     ]
 
-    # Common countries list
+    # Common countries list — Polylop: DACH/EU-focused, replaces US-first default
     COUNTRIES = [
-        "US", "UK", "Japan", "Germany", "France",
-        "Canada", "Australia", "Brazil", "India", "South Korea"
+        "Germany", "Austria", "Switzerland", "Netherlands", "France",
+        "Italy", "Spain", "Poland", "UK", "Sweden"
     ]
 
     # Individual type entities (need to generate specific personas)
@@ -655,7 +655,7 @@ Please generate JSON containing the following fields:
 3. age: Age as number (must be integer)
 4. gender: Gender, must be in English: "male" or "female"
 5. mbti: MBTI type (e.g., INTJ, ENFP)
-6. country: Country (use English, e.g., "US")
+6. country: Country (use English; derive from context — default to European countries like "Germany", "Austria", "Switzerland" when context indicates a European setting; do not default to "US" without evidence)
 7. profession: Profession
 8. interested_topics: Array of interested topics
 
@@ -703,8 +703,8 @@ Please generate JSON containing the following fields:
    - Institutional memories (important part of institutional persona, introduce this institution's association with events and their existing actions/reactions in events)
 3. age: Fixed at 30 (virtual age of institutional account)
 4. gender: Fixed at "other" (institutional account uses other to denote non-individual)
-5. mbti: MBTI type used to describe account style, e.g., ISTJ represents rigorous conservative
-6. country: Country (use English, e.g., "US")
+5. mbti: MBTI type that matches the institution's communication style — choose freely from the full 16-type range (e.g., ENFJ for community-driven, INTP for research-focused, ESTJ for hierarchical, ESFP for entertainment-focused). Do not default to ISTJ.
+6. country: Country (use English; derive from context — e.g., "Germany", "Austria", "Switzerland" for European institutions; do not default to "US" without evidence)
 7. profession: Institutional function description
 8. interested_topics: Array of focus areas
 
@@ -757,8 +757,8 @@ Important:
                 "persona": f"{entity_name} is a media entity that reports news and facilitates public discourse. The account shares timely updates and engages with the audience on current events.",
                 "age": 30,  # Institutional virtual age
                 "gender": "other",  # Institutional uses other
-                "mbti": "ISTJ",  # Institutional style: rigorous conservative
-                "country": "US",
+                "mbti": random.choice(self.MBTI_TYPES),  # Polylop: varied institutional voice instead of ISTJ default
+                "country": random.choice(self.COUNTRIES),  # Polylop: DACH/EU-weighted
                 "profession": "Media",
                 "interested_topics": ["General News", "Current Events", "Public Affairs"],
             }
@@ -769,8 +769,8 @@ Important:
                 "persona": f"{entity_name} is an institutional entity that communicates official positions, announcements, and engages with stakeholders on relevant matters.",
                 "age": 30,  # Institutional virtual age
                 "gender": "other",  # Institutional uses other
-                "mbti": "ISTJ",  # Institutional style: rigorous conservative
-                "country": "US",
+                "mbti": random.choice(self.MBTI_TYPES),  # Polylop: varied institutional voice instead of ISTJ default
+                "country": random.choice(self.COUNTRIES),  # Polylop: DACH/EU-weighted
                 "profession": entity_type,
                 "interested_topics": ["Public Policy", "Community", "Official Announcements"],
             }
@@ -1110,8 +1110,8 @@ Important:
                 # OASIS required fields - ensure all have defaults
                 "age": profile.age if profile.age else 30,
                 "gender": self._normalize_gender(profile.gender),
-                "mbti": profile.mbti if profile.mbti else "ISTJ",
-                "country": profile.country if profile.country else "US",
+                "mbti": profile.mbti if profile.mbti else random.choice(self.MBTI_TYPES),  # Polylop: variable fallback instead of ISTJ
+                "country": profile.country if profile.country else random.choice(self.COUNTRIES),  # Polylop: variable fallback instead of US
             }
 
             # Optional fields
