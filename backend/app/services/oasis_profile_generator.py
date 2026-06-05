@@ -651,6 +651,8 @@ Please generate JSON containing the following fields:
    - Social media behavior (posting frequency, content preferences, interaction style, language characteristics)
    - Positions and views (attitudes toward topics, content that may provoke/touch emotions)
    - Unique features (catchphrases, special experiences, personal interests)
+   - Posting style anchor: explicitly state one tone label (concise / ranting / ironic / supportive / analytical / emotional / neutral) that matches the personality
+   - Active hours anchor: explicitly state one time window (morning / midday / evening / night / always-on) derived from profession and lifestyle
    - Personal memories (important part of persona, introduce this individual's association with events and their existing actions/reactions in events)
 3. age: Age as number (must be integer)
 4. gender: Gender, must be in English: "male" or "female"
@@ -700,6 +702,8 @@ Please generate JSON containing the following fields:
    - Content publishing characteristics (content types, publishing frequency, active time periods)
    - Position and attitude (official stance on core topics, handling of controversies)
    - Special notes (group profiles represented, operational habits)
+   - Posting style anchor: explicitly state one institutional tone label (formal / informative / promotional / reactive / diplomatic / alarmist / neutral) matching the institutional positioning
+   - Active hours anchor: explicitly state one time window (business-hours / always-on / event-driven) derived from institutional type
    - Institutional memories (important part of institutional persona, introduce this institution's association with events and their existing actions/reactions in events)
 3. age: Fixed at 30 (virtual age of institutional account)
 4. gender: Fixed at "other" (institutional account uses other to denote non-individual)
