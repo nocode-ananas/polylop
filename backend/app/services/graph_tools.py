@@ -1166,7 +1166,7 @@ Return the sub-questions as a JSON list."""
                 simulation_id=simulation_id,
                 interviews=interviews_request,
                 platform=None,
-                timeout=180.0
+                timeout=86400.0
             )
 
             logger.info(f"Interview API returned: {api_result.get('interviews_count', 0)} results, success={api_result.get('success')}")

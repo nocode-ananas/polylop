@@ -8,6 +8,7 @@ import logging
 import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
+import requests  # CUSTOM: VRAM flush
 
 from ..config import Config
 from ..models.task import TaskManager, TaskStatus
@@ -233,6 +234,15 @@ class GraphBuilderService:
                     raise
 
         logger.info(f"[graph_build] All {total_chunks} chunks processed successfully")
+        # CUSTOM: flush all Ollama models from VRAM after graph build
+        try:
+            ollama_base = "http://host.docker.internal:11434"
+            ps = requests.get(f"{ollama_base}/api/ps", timeout=5).json()
+            for model in ps.get("models", []):
+                requests.post(f"{ollama_base}/api/generate", json={"model": model["name"], "keep_alive": 0}, timeout=10)
+                logger.info(f"[graph_build] VRAM flush: {model['name']} unloaded")
+        except Exception as e:
+            logger.warning(f"[graph_build] VRAM flush failed (non-critical): {e}")
         return episode_uuids
 
     def _get_graph_info(self, graph_id: str) -> GraphInfo:
