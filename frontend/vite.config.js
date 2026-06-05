@@ -8,7 +8,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3001,
     open: false,
-    allowedHosts: ['wealthiq.ngrok.app'],
+    allowedHosts: 'all',
     proxy: {
       '/api': {
         target: 'http://localhost:5001',
