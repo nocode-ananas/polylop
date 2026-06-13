@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard-container">
     <nav class="dash-navbar">
-      <div class="dash-nav-brand" @click="$router.push('/')">MIROFISH OFFLINE</div>
+      <div class="dash-nav-brand" @click="$router.push('/')">POLYLOP</div>
       <div class="dash-nav-links">
         <router-link to="/" class="dash-nav-link">Home</router-link>
         <router-link to="/dashboard" class="dash-nav-link active">Dashboard</router-link>
