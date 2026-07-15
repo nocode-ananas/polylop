@@ -194,7 +194,8 @@ class OasisProfileGenerator:
 
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            timeout=86400.0,  # PATCH-002b: 24h wie llm_client.py (lange Mistral-Laeufe)
         )
 
         # GraphStorage for hybrid search enrichment
