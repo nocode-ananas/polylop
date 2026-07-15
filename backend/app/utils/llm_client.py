@@ -7,6 +7,7 @@ Supports Ollama num_ctx parameter to prevent prompt truncation
 import json
 import os
 import re
+import time
 from typing import Optional, Dict, Any, List
 from openai import OpenAI
 import logging
@@ -154,18 +155,27 @@ def _try_close_and_parse(candidate: str) -> Optional[Dict[str, Any]]:
 
 
 class LLMClient:
-    """LLM Client"""
+    """LLM Client with retry logic"""
+
+    # PATCH-050: retry configuration (backport nikmcfly PR #50)
+    DEFAULT_MAX_RETRIES = 3
+    DEFAULT_BASE_DELAY = 2.0  # seconds
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: float = 86400.0
+        timeout: float = 86400.0,
+        max_retries: Optional[int] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
+        self.max_retries = max_retries if max_retries is not None else int(
+            os.environ.get('LLM_MAX_RETRIES', str(self.DEFAULT_MAX_RETRIES))
+        )
 
         if not self.api_key:
             raise ValueError("LLM_API_KEY not configured")
@@ -196,6 +206,41 @@ class LLMClient:
     def _is_ollama(self) -> bool:
         """Check if we're talking to an Ollama server."""
         return '11434' in (self.base_url or '')
+
+    def _should_retry(self, exc: Exception) -> bool:
+        """Determine if an exception is retryable (PATCH-050)."""
+        from openai import (
+            RateLimitError,
+            APITimeoutError,
+            APIConnectionError,
+            InternalServerError,
+            APIStatusError,
+        )
+
+        if isinstance(exc, (RateLimitError, APITimeoutError, APIConnectionError)):
+            return True
+        if isinstance(exc, InternalServerError):
+            return True
+        if isinstance(exc, APIStatusError):
+            return exc.status_code in self.RETRYABLE_STATUS_CODES
+        status_code = getattr(exc, 'status_code', None)
+        if status_code and status_code in self.RETRYABLE_STATUS_CODES:
+            return True
+        return False
+
+    def _get_retry_delay(self, attempt: int, exc: Exception = None) -> float:
+        """Exponential backoff; respects Retry-After on 429 (PATCH-050)."""
+        retry_after = None
+        if exc and hasattr(exc, 'response') and exc.response is not None:
+            retry_after = exc.response.headers.get('Retry-After')
+            if retry_after:
+                try:
+                    return float(retry_after)
+                except (ValueError, TypeError):
+                    pass
+
+        delay = self.DEFAULT_BASE_DELAY * (2 ** attempt)
+        return min(delay, 60.0)
 
     def chat(
         self,
@@ -232,11 +277,37 @@ class LLMClient:
                 "options": {"num_ctx": self._num_ctx}
             }
 
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        # Some models (like MiniMax M2.5) include <think>thinking content in response, need to remove
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-        return content
+        # PATCH-050: retry loop with exponential backoff
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                content = response.choices[0].message.content
+                # Some models (like MiniMax M2.5) include <think>thinking content in response, need to remove
+                content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                return content
+
+            except Exception as e:
+                last_error = e
+
+                if not self._should_retry(e):
+                    logger.error(f"[LLM] Non-retryable error: {type(e).__name__}: {e}")
+                    raise
+
+                if attempt < self.max_retries:
+                    delay = self._get_retry_delay(attempt, e)
+                    logger.warning(
+                        f"[LLM] Retryable error (attempt {attempt + 1}/{self.max_retries + 1}): "
+                        f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        f"[LLM] All {self.max_retries + 1} attempts failed. "
+                        f"Last error: {type(e).__name__}: {e}"
+                    )
+
+        raise last_error
 
     def chat_json(
         self,
