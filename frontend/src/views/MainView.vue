@@ -171,6 +171,11 @@ const checkBackendHealth = async () => {
     // Any response (even 404) means backend is reachable
     backendReachable.value = true
   } catch (e) {
+    // PATCH-051a: an HTTP error response (e.g. 404) still proves the backend is reachable
+    if (e.response) {
+      backendReachable.value = true
+      return
+    }
     if (backendReachable.value) {
       addLog('WARNING: Backend unreachable — check if server is running')
     }
