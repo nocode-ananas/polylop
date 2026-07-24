@@ -173,6 +173,11 @@ except ImportError as e:
     print("Please install first: pip install oasis-ai camel-ai")
     sys.exit(1)
 
+# CUSTOM (Polylop Phase 2b): influence_weight as a numeric behaviour weight.
+# Imported unguarded on purpose - a missing patch module must fail loudly
+# instead of silently producing an unweighted simulation.
+from polylop_influence import apply_influence_patches
+
 
 # Twitter available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
 TWITTER_ACTIONS = [
@@ -1572,7 +1577,11 @@ async def main():
         if args.max_rounds < config_total_rounds:
             log_manager.info(f"  - Actual execution rounds: {args.max_rounds} (Truncated)")
     log_manager.info(f"  - Number of Agents: {len(config.get('agent_configs', []))}")
-    
+
+    # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop.
+    # Both platform simulations run in this process, so one call covers both.
+    apply_influence_patches(config)
+
     log_manager.info("Log structure:")
     log_manager.info(f"  - Main log: simulation.log")
     log_manager.info(f"  - Twitter actions: twitter/actions.jsonl")

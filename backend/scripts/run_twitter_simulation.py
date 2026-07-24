@@ -130,6 +130,11 @@ except ImportError as e:
     print("Please install first: pip install oasis-ai camel-ai")
     sys.exit(1)
 
+# CUSTOM (Polylop Phase 2b): influence_weight as a numeric behaviour weight.
+# Imported unguarded on purpose - a missing patch module must fail loudly
+# instead of silently producing an unweighted simulation.
+from polylop_influence import apply_influence_patches
+
 
 # IPC-related constants
 IPC_COMMANDS_DIR = "ipc_commands"
@@ -572,7 +577,10 @@ class TwitterSimulationRunner:
         if max_rounds:
             print(f"  - Maximum rounds limit: {max_rounds}")
         print(f"  - Number of Agents: {len(self.config.get('agent_configs', []))}")
-        
+
+        # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop
+        apply_influence_patches(self.config)
+
         # Create model
         print("\nInitialize LLM model...")
         model = self._create_model()
