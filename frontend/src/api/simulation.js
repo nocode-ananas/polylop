@@ -1,11 +1,11 @@
-import service, { requestWithRetry } from './index'
+import service from './index'
 
 /**
  * Create simulation
  * @param {Object} data - { project_id, graph_id?, enable_twitter?, enable_reddit? }
  */
 export const createSimulation = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/create', data), 3, 1000)
+  return service.post('/api/simulation/create', data)
 }
 
 /**
@@ -13,7 +13,7 @@ export const createSimulation = (data) => {
  * @param {Object} data - { simulation_id, entity_types?, use_llm_for_profiles?, parallel_profile_count?, force_regenerate? }
  */
 export const prepareSimulation = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/prepare', data), 3, 1000)
+  return service.post('/api/simulation/prepare', data)
 }
 
 /**
@@ -81,7 +81,7 @@ export const listSimulations = (projectId) => {
  * @param {Object} data - { simulation_id, platform?, max_rounds?, enable_graph_memory_update? }
  */
 export const startSimulation = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/start', data), 3, 1000)
+  return service.post('/api/simulation/start', data)
 }
 
 /**
@@ -173,7 +173,7 @@ export const getEnvStatus = (data) => {
  * @param {Object} data - { simulation_id, interviews: [{ agent_id, prompt }] }
  */
 export const interviewAgents = (data) => {
-  return requestWithRetry(() => service.post('/api/simulation/interview/batch', data), 3, 1000)
+  return service.post('/api/simulation/interview/batch', data)
 }
 
 /**

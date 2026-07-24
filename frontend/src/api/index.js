@@ -55,7 +55,12 @@ service.interceptors.response.use(
   }
 )
 
-// Request function with retry
+// Request helper with retry.
+// PATCH-006: NUR fuer idempotente Requests (GET/Polling) verwenden.
+// Bei POST/PUT/DELETE fuehrt ein Retry nach Timeout dazu, dass eine bereits
+// serverseitig gestartete Aktion (Simulation, Graph-Build, Report) mehrfach
+// ausgeloest wird. Die POST-Aufrufe in graph.js/simulation.js/report.js
+// rufen deshalb direkt, ohne Retry.
 export const requestWithRetry = async (requestFn, maxRetries = 3, delay = 1000) => {
   for (let i = 0; i < maxRetries; i++) {
     try {
