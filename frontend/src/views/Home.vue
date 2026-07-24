@@ -39,7 +39,7 @@
 
         <div class="hero-right" :style="s.heroRight">
           <div class="logo-container" :style="s.logoContainer">
-            <img src="../assets/logo/MiroFish_logo_left.jpeg" alt="Polylop Logo" :style="s.heroLogo" />
+            <img src="../assets/logo/polylop-wordmark-lockup.png" alt="Polylop — Laterna Futura" :style="s.heroLogo" />
           </div>
           <button :style="s.scrollDownBtn" @click="scrollToBottom">↓</button>
         </div>
