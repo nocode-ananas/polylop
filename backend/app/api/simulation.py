@@ -1680,14 +1680,19 @@ def stop_simulation():
             }), 400
         
         run_state = SimulationRunner.stop_simulation(simulation_id)
-        
+
         # Update simulation status
+        # PATCH:sim-lifecycle-v1 — STOPPED, not PAUSED: the process is terminated, not
+        # suspended, and there is no resume path. PAUSED also overwrote the 'stopped'
+        # status the runner had just written, putting the two state files out of sync
+        # again (no frontend view renders 'paused' — DashboardView only knows stopped).
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
         if state:
-            state.status = SimulationStatus.PAUSED
+            state.status = SimulationStatus.STOPPED
             manager._save_simulation_state(state)
-        
+
+
         return jsonify({
             "success": True,
             "data": run_state.to_dict()

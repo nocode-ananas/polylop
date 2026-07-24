@@ -142,7 +142,11 @@ class SimulationRunState:
 
     # Process ID (for stopping)
     process_pid: Optional[int] = None
-    
+
+    # PATCH:sim-lifecycle-v1 — command line of the started process, used to tell a
+    # genuine simulation process apart from an unrelated one that reused the PID
+    process_cmdline: Optional[str] = None
+
     def add_action(self, action: AgentAction):
         """Add action to recent actions list"""
         self.recent_actions.insert(0, action)
@@ -182,6 +186,7 @@ class SimulationRunState:
             "completed_at": self.completed_at,
             "error": self.error,
             "process_pid": self.process_pid,
+            "process_cmdline": self.process_cmdline,  # PATCH:sim-lifecycle-v1
         }
 
     def to_detail_dict(self) -> Dict[str, Any]:
@@ -225,7 +230,181 @@ class SimulationRunner:
     
     # Graph memory update configuration
     _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
-    
+
+    # PATCH:sim-lifecycle-v1 — start serialization and stop bookkeeping
+    _start_locks: Dict[str, threading.Lock] = {}
+    _start_locks_guard = threading.Lock()
+    _stop_requested: set = set()
+    _state_write_lock = threading.Lock()
+
+    # PATCH:sim-lifecycle-v1 — runner status -> status written to state.json
+    # (SimulationManager's file, see SimulationStatus in simulation_manager.py)
+    _SIM_STATUS_BY_RUNNER = {
+        RunnerStatus.RUNNING: "running",
+        RunnerStatus.STOPPED: "stopped",
+        RunnerStatus.COMPLETED: "completed",
+        RunnerStatus.FAILED: "failed",
+    }
+
+    # ============== PATCH:sim-lifecycle-v1 — process identity helpers ==============
+    # psutil is not installed in the runtime image, so these are stdlib only.
+
+    @classmethod
+    def _pid_alive(cls, pid: int) -> bool:
+        """Whether a process with this PID currently exists."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but belongs to another user
+            return True
+        except OSError:
+            return False
+
+    @classmethod
+    def _get_process_cmdline(cls, pid: int) -> Optional[str]:
+        """Command line of a running process, or None if it cannot be read."""
+        # Linux (the runtime container): /proc is authoritative
+        try:
+            with open(f"/proc/{pid}/cmdline", 'rb') as f:
+                raw = f.read()
+            if raw:
+                return raw.replace(b'\x00', b' ').decode('utf-8', errors='replace').strip()
+        except OSError:
+            pass
+
+        # macOS / BSD fallback
+        if not IS_WINDOWS:
+            try:
+                result = subprocess.run(
+                    ['ps', '-p', str(pid), '-o', 'args='],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except Exception:
+                pass
+        return None
+
+    @classmethod
+    def _verify_simulation_process(
+        cls,
+        pid: int,
+        simulation_id: str,
+        expected_cmdline: Optional[str] = None
+    ) -> str:
+        """
+        Decide whether the process behind a PID really is this simulation.
+
+        A bare os.kill(pid, 0) only proves *some* process holds that PID — after a
+        reboot or a long-running backend the PID may have been recycled by an
+        unrelated process, which would then be adopted as a simulation (and, worse,
+        signalled by stop).
+
+        Returns one of:
+            "match"    — the process exists and is this simulation
+            "mismatch" — the process exists but is something else (PID reuse)
+            "gone"     — no such process
+            "unknown"  — the process exists but could not be identified
+        """
+        if not pid or not cls._pid_alive(pid):
+            return "gone"
+
+        cmdline = cls._get_process_cmdline(pid)
+        if not cmdline:
+            return "unknown"
+
+        normalized = " ".join(cmdline.split())
+
+        if expected_cmdline and normalized == " ".join(expected_cmdline.split()):
+            return "match"
+
+        # Fallback for run_state.json written before this patch (no cmdline recorded),
+        # and for cosmetic differences in how the command line is reported: the start
+        # command always carries the script name and a config path containing the
+        # simulation id — an unrelated process that inherited the PID never does.
+        if simulation_id in normalized and "_simulation.py" in normalized:
+            return "match"
+        return "mismatch"
+
+    @classmethod
+    def _write_json_atomic(cls, path: str, data: Any):
+        """
+        Write JSON via temp file + rename, so a reader never sees a half-written file.
+
+        The temp name carries pid and thread id: the monitor thread rewrites run_state.json
+        every 2s while API threads write it too, and a shared temp name makes the second
+        rename fail with FileNotFoundError once the first one consumed the file.
+        """
+        tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with cls._state_write_lock:
+            try:
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+    @classmethod
+    def _sync_simulation_status(cls, simulation_id: str, runner_status: RunnerStatus):
+        """
+        Mirror a runner status into state.json.
+
+        state.json is owned by SimulationManager and is only ever set to "running" on
+        start and to "paused"/"stopped" by explicit endpoints — nothing wrote the
+        terminal status when a simulation ended on its own, so finished simulations
+        kept showing up as running.
+        """
+        mapped = cls._SIM_STATUS_BY_RUNNER.get(runner_status)
+        if not mapped:
+            return
+
+        state_file = os.path.join(cls.RUN_STATE_DIR, simulation_id, "state.json")
+        if not os.path.exists(state_file):
+            return
+
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data.get('status') == mapped:
+                return
+            data['status'] = mapped
+            data['updated_at'] = datetime.now().isoformat()
+            cls._write_json_atomic(state_file, data)
+            logger.info(f"Synced state.json status to '{mapped}': {simulation_id}")
+        except Exception as e:
+            logger.warning(f"Failed to sync state.json for {simulation_id}: {e}")
+
+    @classmethod
+    def _get_start_lock(cls, simulation_id: str) -> threading.Lock:
+        """Per-simulation lock so concurrent /start requests cannot both spawn a process."""
+        with cls._start_locks_guard:
+            lock = cls._start_locks.get(simulation_id)
+            if lock is None:
+                lock = threading.Lock()
+                cls._start_locks[simulation_id] = lock
+            return lock
+
+    @classmethod
+    def _is_reloader_parent(cls) -> bool:
+        """
+        True in the Flask debug reloader's *parent* process.
+
+        With DEBUG on, run.py's app.run() starts the reloader, so create_app() runs in
+        two processes. Only the child serves requests; if both reconnect orphans, two
+        monitor threads in two processes write the same run_state.json and a stop
+        issued in the child gets overwritten by the parent.
+        """
+        return bool(Config.DEBUG) and os.environ.get('WERKZEUG_RUN_MAIN') != 'true'
+
     @classmethod
     def reconnect_orphaned_simulations(cls):
         """
@@ -235,34 +414,62 @@ class SimulationRunner:
         """
         if not os.path.exists(cls.RUN_STATE_DIR):
             return
-        
+
+        # PATCH:sim-lifecycle-v1 — never reconnect twice (see _is_reloader_parent)
+        if cls._is_reloader_parent():
+            logger.info("Skipping orphan reconnect in the reloader parent process")
+            return
+
         for sim_id in os.listdir(cls.RUN_STATE_DIR):
             state_file = os.path.join(cls.RUN_STATE_DIR, sim_id, "run_state.json")
             if not os.path.exists(state_file):
                 continue
-            
+
             try:
                 state = cls._load_run_state(sim_id)
                 if not state or state.runner_status != RunnerStatus.RUNNING:
                     continue
-                
+
                 pid = state.process_pid
+
+                # PATCH:sim-lifecycle-v1 — a 'running' state without a PID used to be
+                # skipped silently, leaving the simulation on 'running' forever.
                 if not pid:
+                    cls._finalize_orphan_as_stopped(
+                        state, "Backend restarted; no process PID was recorded for this run"
+                    )
+                    logger.info(f"Marked PID-less running simulation as stopped: {sim_id}")
                     continue
-                
-                # Check if process is still alive
-                try:
-                    os.kill(pid, 0)
-                except (ProcessLookupError, PermissionError):
-                    state.runner_status = RunnerStatus.STOPPED
-                    state.twitter_running = False
-                    state.reddit_running = False
-                    state.completed_at = datetime.now().isoformat()
-                    state.error = "Process died while backend was restarting"
-                    cls._save_run_state(state)
+
+                # PATCH:sim-lifecycle-v1 — os.kill(pid, 0) alone would adopt whatever
+                # process happens to hold that PID now.
+                verdict = cls._verify_simulation_process(pid, sim_id, state.process_cmdline)
+                if verdict == "gone":
+                    cls._finalize_orphan_as_stopped(
+                        state, "Process died while backend was restarting"
+                    )
                     logger.info(f"Marked dead simulation as stopped: {sim_id} (pid {pid})")
                     continue
-                
+                if verdict == "mismatch":
+                    cls._finalize_orphan_as_stopped(
+                        state,
+                        f"Process died while backend was restarting "
+                        f"(PID {pid} now belongs to an unrelated process)"
+                    )
+                    logger.warning(
+                        f"Not adopting pid {pid} for {sim_id}: PID was reused by another process"
+                    )
+                    continue
+                if verdict == "unknown":
+                    cls._finalize_orphan_as_stopped(
+                        state,
+                        f"Backend restarted; process {pid} could not be identified as this simulation"
+                    )
+                    logger.warning(
+                        f"Not adopting pid {pid} for {sim_id}: identity could not be verified"
+                    )
+                    continue
+
                 if sim_id in cls._monitor_threads:
                     continue
                 
@@ -303,29 +510,41 @@ class SimulationRunner:
                 
             except Exception as e:
                 logger.error(f"Failed to reconnect simulation {sim_id}: {e}")
-    
+
+    @classmethod
+    def _finalize_orphan_as_stopped(cls, state: SimulationRunState, reason: str):
+        """PATCH:sim-lifecycle-v1 — close out a run whose process is not (or no longer) ours."""
+        state.runner_status = RunnerStatus.STOPPED
+        state.twitter_running = False
+        state.reddit_running = False
+        state.completed_at = datetime.now().isoformat()
+        state.error = reason
+        cls._save_run_state(state)
+        cls._sync_simulation_status(state.simulation_id, RunnerStatus.STOPPED)
+
     @classmethod
     def _monitor_orphaned_simulation(cls, simulation_id: str, pid: int):
         """Monitor an orphaned simulation by reading its action logs and checking PID liveness."""
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         twitter_log = os.path.join(sim_dir, "twitter", "actions.jsonl")
         reddit_log = os.path.join(sim_dir, "reddit", "actions.jsonl")
-        
+
         state = cls.get_run_state(simulation_id)
         if not state:
             return
-        
+
         # Start from end of existing logs to avoid re-processing old actions
         twitter_position = os.path.getsize(twitter_log) if os.path.exists(twitter_log) else 0
         reddit_position = os.path.getsize(reddit_log) if os.path.exists(reddit_log) else 0
-        
+
+        expected_cmdline = state.process_cmdline
+
         def is_alive():
-            try:
-                os.kill(pid, 0)
-                return True
-            except (ProcessLookupError, PermissionError):
-                return False
-        
+            # PATCH:sim-lifecycle-v1 — re-check identity, not just PID existence: if the
+            # simulation dies and its PID is recycled, a plain liveness check would keep
+            # this monitor running against a stranger's process forever.
+            return cls._verify_simulation_process(pid, simulation_id, expected_cmdline) == "match"
+
         try:
             while is_alive():
                 if os.path.exists(twitter_log):
@@ -345,7 +564,11 @@ class SimulationRunner:
             if os.path.exists(reddit_log):
                 cls._read_action_log(reddit_log, reddit_position, state, "reddit")
             
-            if state.twitter_completed and state.reddit_completed:
+            # PATCH:sim-lifecycle-v1 — an explicit stop wins over the exit-based verdict,
+            # which would otherwise report a manually stopped run as completed.
+            if simulation_id in cls._stop_requested:
+                state.runner_status = RunnerStatus.STOPPED
+            elif state.twitter_completed and state.reddit_completed:
                 state.runner_status = RunnerStatus.COMPLETED
             else:
                 state.runner_status = RunnerStatus.STOPPED
@@ -353,13 +576,23 @@ class SimulationRunner:
             state.reddit_running = False
             state.completed_at = datetime.now().isoformat()
             cls._save_run_state(state)
+            cls._sync_simulation_status(simulation_id, state.runner_status)  # PATCH:sim-lifecycle-v1
             logger.info(f"Orphaned simulation finished: {simulation_id}, status={state.runner_status.value}")
-            
+
         except Exception as e:
             logger.error(f"Orphan monitor error for {simulation_id}: {e}")
-            state.runner_status = RunnerStatus.FAILED
-            state.error = str(e)
+            # PATCH:sim-lifecycle-v1 — do not relabel a requested stop as a failure
+            if simulation_id in cls._stop_requested:
+                state.runner_status = RunnerStatus.STOPPED
+            else:
+                state.runner_status = RunnerStatus.FAILED
+                state.error = str(e)
+            state.twitter_running = False
+            state.reddit_running = False
+            if not state.completed_at:
+                state.completed_at = datetime.now().isoformat()
             cls._save_run_state(state)
+            cls._sync_simulation_status(simulation_id, state.runner_status)
         finally:
             if cls._graph_memory_enabled.get(simulation_id, False):
                 try:
@@ -368,6 +601,7 @@ class SimulationRunner:
                     pass
                 cls._graph_memory_enabled.pop(simulation_id, None)
             cls._monitor_threads.pop(simulation_id, None)
+            cls._stop_requested.discard(simulation_id)  # PATCH:sim-lifecycle-v1
     
     @classmethod
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
@@ -415,6 +649,7 @@ class SimulationRunner:
                 completed_at=data.get("completed_at"),
                 error=data.get("error"),
                 process_pid=data.get("process_pid"),
+                process_cmdline=data.get("process_cmdline"),  # PATCH:sim-lifecycle-v1
             )
 
             # Load recent actions
@@ -445,10 +680,11 @@ class SimulationRunner:
         state_file = os.path.join(sim_dir, "run_state.json")
         
         data = state.to_detail_dict()
-        
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
+        # PATCH:sim-lifecycle-v1 — atomic write: this file is rewritten every 2s by the
+        # monitor thread, so a partial write would leave unreadable status behind
+        cls._write_json_atomic(state_file, data)
+
         cls._run_states[state.simulation_id] = state
     
     @classmethod
@@ -474,11 +710,50 @@ class SimulationRunner:
         Returns:
             SimulationRunState
         """
+        # PATCH:sim-lifecycle-v1 — serialize check-and-spawn per simulation. Without the
+        # lock two concurrent /start requests (the axios interceptor retries POSTs up to
+        # 3x) both pass the status check and spawn a process into the same directory.
+        with cls._get_start_lock(simulation_id):
+            return cls._start_simulation_locked(
+                simulation_id=simulation_id,
+                platform=platform,
+                max_rounds=max_rounds,
+                enable_graph_memory_update=enable_graph_memory_update,
+                graph_id=graph_id,
+                storage=storage,
+            )
+
+    @classmethod
+    def _start_simulation_locked(
+        cls,
+        simulation_id: str,
+        platform: str = "parallel",
+        max_rounds: int = None,
+        enable_graph_memory_update: bool = False,
+        graph_id: str = None,
+        storage: 'GraphStorage' = None
+    ) -> SimulationRunState:
+        """Body of start_simulation; must only be called while holding the start lock."""
         # Check if already running
         existing = cls.get_run_state(simulation_id)
-        if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
+        if existing and existing.runner_status in [
+            RunnerStatus.RUNNING, RunnerStatus.STARTING, RunnerStatus.STOPPING
+        ]:
             raise ValueError(f"Simulation already running: {simulation_id}")
-        
+
+        # PATCH:sim-lifecycle-v1 — the status field is not proof: a stop that failed to
+        # kill the process leaves 'stopped' behind while the process keeps running (and
+        # keeps calling the LLM API). Refuse as long as the real process is alive.
+        if existing and existing.process_pid:
+            verdict = cls._verify_simulation_process(
+                existing.process_pid, simulation_id, existing.process_cmdline
+            )
+            if verdict == "match":
+                raise ValueError(
+                    f"Simulation process is still alive (pid {existing.process_pid}): "
+                    f"{simulation_id}. Stop it before starting again."
+                )
+
         # Load simulation config
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
@@ -597,9 +872,14 @@ class SimulationRunner:
             cls._stderr_files[simulation_id] = None  # No longer need separate stderr
             
             state.process_pid = process.pid
+            # PATCH:sim-lifecycle-v1 — record the exact command line so a later reconnect
+            # or stop can prove this PID still belongs to this simulation
+            state.process_cmdline = " ".join(cmd)
             state.runner_status = RunnerStatus.RUNNING
             cls._processes[simulation_id] = process
+            cls._stop_requested.discard(simulation_id)  # PATCH:sim-lifecycle-v1
             cls._save_run_state(state)
+            cls._sync_simulation_status(simulation_id, RunnerStatus.RUNNING)  # PATCH:sim-lifecycle-v1
             
             # Start monitoring thread
             monitor_thread = threading.Thread(
@@ -664,13 +944,22 @@ class SimulationRunner:
             
             # Process ended
             exit_code = process.returncode
-            
-            if exit_code == 0:
+
+            # PATCH:sim-lifecycle-v1 — a requested stop terminates the process with
+            # SIGTERM, so exit_code is non-zero and this branch used to overwrite the
+            # stop with 'failed'. The explicit request wins over the exit code.
+            if simulation_id in cls._stop_requested:
+                state.runner_status = RunnerStatus.STOPPED
+                state.completed_at = datetime.now().isoformat()
+                logger.info(f"Simulation stopped on request: {simulation_id} (exit code {exit_code})")
+            elif exit_code == 0:
                 state.runner_status = RunnerStatus.COMPLETED
                 state.completed_at = datetime.now().isoformat()
                 logger.info(f"Simulation completed: {simulation_id}")
             else:
                 state.runner_status = RunnerStatus.FAILED
+                # PATCH:sim-lifecycle-v1 — failures used to leave completed_at empty
+                state.completed_at = datetime.now().isoformat()
                 # Read error info from main log file
                 main_log_path = os.path.join(sim_dir, "simulation.log")
                 error_info = ""
@@ -682,17 +971,27 @@ class SimulationRunner:
                     pass
                 state.error = f"Process exit code: {exit_code}, error: {error_info}"
                 logger.error(f"Simulation failed: {simulation_id}, error={state.error}")
-            
+
             state.twitter_running = False
             state.reddit_running = False
             cls._save_run_state(state)
-            
+            cls._sync_simulation_status(simulation_id, state.runner_status)  # PATCH:sim-lifecycle-v1
+
         except Exception as e:
             logger.error(f"Monitor thread exception: {simulation_id}, error={str(e)}")
-            state.runner_status = RunnerStatus.FAILED
-            state.error = str(e)
+            # PATCH:sim-lifecycle-v1 — do not relabel a requested stop as a failure
+            if simulation_id in cls._stop_requested:
+                state.runner_status = RunnerStatus.STOPPED
+            else:
+                state.runner_status = RunnerStatus.FAILED
+                state.error = str(e)
+            state.twitter_running = False
+            state.reddit_running = False
+            if not state.completed_at:
+                state.completed_at = datetime.now().isoformat()
             cls._save_run_state(state)
-        
+            cls._sync_simulation_status(simulation_id, state.runner_status)
+
         finally:
             # Stop graph memory updater
             if cls._graph_memory_enabled.get(simulation_id, False):
@@ -706,6 +1005,8 @@ class SimulationRunner:
             # Clean up process resources
             cls._processes.pop(simulation_id, None)
             cls._action_queues.pop(simulation_id, None)
+            cls._monitor_threads.pop(simulation_id, None)   # PATCH:sim-lifecycle-v1
+            cls._stop_requested.discard(simulation_id)      # PATCH:sim-lifecycle-v1
             
             # Close log file handle
             if simulation_id in cls._stdout_files:
@@ -915,20 +1216,101 @@ class SimulationRunner:
                 process.wait(timeout=5)
     
     @classmethod
+    def _terminate_pid(
+        cls,
+        pid: int,
+        simulation_id: str,
+        expected_cmdline: Optional[str] = None,
+        timeout: int = 10
+    ) -> bool:
+        """
+        PATCH:sim-lifecycle-v1 — terminate a simulation we have no Popen handle for.
+
+        After a backend restart the process is an orphan: it is still running (and still
+        billing LLM calls) but cls._processes is empty, so the Popen-based path below
+        silently does nothing. Identity is verified first — this signals a process we
+        did not spawn, so killing the wrong PID must be impossible.
+
+        Returns True if the process is gone afterwards.
+        """
+        verdict = cls._verify_simulation_process(pid, simulation_id, expected_cmdline)
+        if verdict == "gone":
+            return True
+        if verdict != "match":
+            logger.error(
+                f"Refusing to signal pid {pid} for {simulation_id}: "
+                f"process identity is '{verdict}', not this simulation"
+            )
+            return False
+
+        if IS_WINDOWS:
+            try:
+                subprocess.run(['taskkill', '/PID', str(pid), '/T'], capture_output=True, timeout=5)
+                deadline = time.time() + timeout
+                while time.time() < deadline and cls._pid_alive(pid):
+                    time.sleep(0.2)
+                if cls._pid_alive(pid):
+                    subprocess.run(
+                        ['taskkill', '/F', '/PID', str(pid), '/T'], capture_output=True, timeout=5
+                    )
+            except Exception as e:
+                logger.error(f"taskkill failed for orphan pid {pid}: {e}")
+        else:
+            # Simulations are started with start_new_session=True, so the process group
+            # id equals the pid. If that no longer holds, only signal the process itself
+            # rather than a group that may contain unrelated processes.
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                return True
+            except OSError as e:
+                logger.warning(f"Could not read process group of pid {pid}: {e}")
+                pgid = None
+
+            def signal_target(sig):
+                if pgid == pid:
+                    os.killpg(pgid, sig)
+                else:
+                    os.kill(pid, sig)
+
+            try:
+                logger.info(f"Terminating orphaned simulation process: {simulation_id}, pid={pid}, pgid={pgid}")
+                signal_target(signal.SIGTERM)
+                deadline = time.time() + timeout
+                while time.time() < deadline and cls._pid_alive(pid):
+                    time.sleep(0.2)
+                if cls._pid_alive(pid):
+                    logger.warning(f"Orphan not responding to SIGTERM, force terminating: {simulation_id}")
+                    signal_target(signal.SIGKILL)
+                    deadline = time.time() + 5
+                    while time.time() < deadline and cls._pid_alive(pid):
+                        time.sleep(0.2)
+            except ProcessLookupError:
+                return True
+            except Exception as e:
+                logger.error(f"Failed to terminate orphan pid {pid} for {simulation_id}: {e}")
+
+        return not cls._pid_alive(pid)
+
+    @classmethod
     def stop_simulation(cls, simulation_id: str) -> SimulationRunState:
         """Stop simulation"""
         state = cls.get_run_state(simulation_id)
         if not state:
             raise ValueError(f"Simulation does not exist: {simulation_id}")
-        
+
         if state.runner_status not in [RunnerStatus.RUNNING, RunnerStatus.PAUSED]:
             raise ValueError(f"Simulation not running: {simulation_id}, status={state.runner_status}")
-        
+
+        # PATCH:sim-lifecycle-v1 — mark the stop before killing, so the monitor thread
+        # reports 'stopped' instead of deriving 'failed' from the SIGTERM exit code
+        cls._stop_requested.add(simulation_id)
         state.runner_status = RunnerStatus.STOPPING
         cls._save_run_state(state)
-        
+
         # Terminate process
         process = cls._processes.get(simulation_id)
+        terminated = True
         if process and process.poll() is None:
             try:
                 cls._terminate_process(process, simulation_id)
@@ -943,13 +1325,39 @@ class SimulationRunner:
                     process.wait(timeout=5)
                 except Exception:
                     process.kill()
-        
+        elif state.process_pid:
+            # PATCH:sim-lifecycle-v1 — reconnected simulations have no Popen handle;
+            # without this the process survived 'stop' and kept calling the LLM API
+            terminated = cls._terminate_pid(
+                state.process_pid, simulation_id, state.process_cmdline
+            )
+
+        # PATCH:sim-lifecycle-v1 — let the monitor finish first, otherwise it wakes up
+        # after this method returns and writes its own verdict over the stopped status
+        monitor = cls._monitor_threads.get(simulation_id)
+        if monitor and monitor.is_alive() and monitor is not threading.current_thread():
+            monitor.join(timeout=15)
+
+        state = cls.get_run_state(simulation_id) or state
         state.runner_status = RunnerStatus.STOPPED
         state.twitter_running = False
         state.reddit_running = False
         state.completed_at = datetime.now().isoformat()
+        if not terminated:
+            # PATCH:sim-lifecycle-v1 — never report a clean stop we did not achieve
+            state.error = (
+                f"Stop requested, but process {state.process_pid} could not be terminated — "
+                f"it may still be running. Check the process manually."
+            )
+            logger.error(f"Stop did not terminate the process: {simulation_id}, pid={state.process_pid}")
         cls._save_run_state(state)
-        
+        cls._sync_simulation_status(simulation_id, RunnerStatus.STOPPED)  # PATCH:sim-lifecycle-v1
+
+        # PATCH:sim-lifecycle-v1 — a monitor still running past the join above clears the
+        # flag itself when it exits; clearing it here would let it write 'failed' after all
+        if not (monitor and monitor.is_alive()):
+            cls._stop_requested.discard(simulation_id)
+
         # Stop graph memory updater
         if cls._graph_memory_enabled.get(simulation_id, False):
             try:
@@ -1396,23 +1804,10 @@ class SimulationRunner:
                         cls._save_run_state(state)
                     
                     # Also update state.json, set status to stopped
-                    try:
-                        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
-                        state_file = os.path.join(sim_dir, "state.json")
-                        logger.info(f"Attempting to update state.json: {state_file}")
-                        if os.path.exists(state_file):
-                            with open(state_file, 'r', encoding='utf-8') as f:
-                                state_data = json.load(f)
-                            state_data['status'] = 'stopped'
-                            state_data['updated_at'] = datetime.now().isoformat()
-                            with open(state_file, 'w', encoding='utf-8') as f:
-                                json.dump(state_data, f, indent=2, ensure_ascii=False)
-                            logger.info(f"Updated state.json status to stopped: {simulation_id}")
-                        else:
-                            logger.warning(f"state.json does not exist: {state_file}")
-                    except Exception as state_err:
-                        logger.warning(f"Failed to update state.json: {simulation_id}, error={state_err}")
-                        
+                    # PATCH:sim-lifecycle-v1 — one shared, atomic writer for this file
+                    cls._sync_simulation_status(simulation_id, RunnerStatus.STOPPED)
+
+
             except Exception as e:
                 logger.error(f"Failed to clean up process: {simulation_id}, error={e}")
         
