@@ -15,6 +15,16 @@
 
 </div>
 
+> [!IMPORTANT]
+> **Polylop fork — this is not how this repository actually runs.**
+> The text below is inherited from upstream and describes the fully-local
+> Ollama setup. Polylop runs the LLM work on **Mistral Cloud (EU/France)**,
+> keeps **embeddings local** (`nomic-embed-text` on the host's Ollama via
+> `host.docker.internal:11434`) and Neo4j in Docker. There is **no Ollama
+> container** in this fork's `docker-compose.yml`.
+> Actual setup, deltas and backported PRs: [`POLYLOP.md`](./POLYLOP.md).
+> A working `.env` template for this fork: [`.env.example`](./.env.example).
+
 ## What is this?
 
 MiroFish is a multi-agent simulation engine: upload any document (press release, policy draft, financial report), and it generates hundreds of AI agents with unique personalities that simulate the public reaction on social media. Posts, arguments, opinion shifts — hour by hour.
@@ -65,6 +75,11 @@ docker exec mirofish-ollama ollama pull qwen2.5:32b
 docker exec mirofish-ollama ollama pull nomic-embed-text
 ```
 
+> **Polylop:** the two `docker exec mirofish-ollama` lines do not apply here —
+> that container does not exist in this fork. `docker compose up -d` starts
+> `mirofish-offline` + `mirofish-neo4j`; the LLM is reached over the network
+> (Mistral), embeddings over the host's own Ollama.
+
 Open `http://localhost:3000` — that's it.
 
 ### Option B: Cloud Mode (OpenRouter / OpenAI)
@@ -82,8 +97,15 @@ If you have limited local hardware, you can run the simulation using cloud APIs 
    ```
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+   docker compose up -d
    ```
+
+   > **Polylop:** upstream needed a second compose file here to switch the
+   > Ollama container off. This fork has no Ollama container, so cloud mode
+   > *is* the default — `docker compose up -d` is all it takes.
+   > `docker-compose.cloud.yml` was removed (it referenced a service that no
+   > longer exists). Polylop uses Mistral rather than OpenRouter; see
+   > [`.env.example`](./.env.example).
 
 ### Option C: Hybrid Routing (Performance & Cost Optimized)
 
