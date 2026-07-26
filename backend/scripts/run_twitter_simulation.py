@@ -134,6 +134,9 @@ except ImportError as e:
 # Imported unguarded on purpose - a missing patch module must fail loudly
 # instead of silently producing an unweighted simulation.
 from polylop_influence import apply_influence_patches
+# CUSTOM (Polylop): guard against Mistral error 3240 — an empty model reply
+# after a tool result poisons the agent memory and kills the agent for good.
+from polylop_empty_reply_guard import apply_empty_reply_guard
 
 
 # IPC-related constants
@@ -580,6 +583,7 @@ class TwitterSimulationRunner:
 
         # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop
         apply_influence_patches(self.config)
+        apply_empty_reply_guard()
 
         # Create model
         print("\nInitialize LLM model...")

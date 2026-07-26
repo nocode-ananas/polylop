@@ -177,6 +177,9 @@ except ImportError as e:
 # Imported unguarded on purpose - a missing patch module must fail loudly
 # instead of silently producing an unweighted simulation.
 from polylop_influence import apply_influence_patches
+# CUSTOM (Polylop): guard against Mistral error 3240 — an empty model reply
+# after a tool result poisons the agent memory and kills the agent for good.
+from polylop_empty_reply_guard import apply_empty_reply_guard
 
 
 # Twitter available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
@@ -1581,6 +1584,7 @@ async def main():
     # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop.
     # Both platform simulations run in this process, so one call covers both.
     apply_influence_patches(config)
+    apply_empty_reply_guard()
 
     log_manager.info("Log structure:")
     log_manager.info(f"  - Main log: simulation.log")
