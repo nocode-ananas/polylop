@@ -180,6 +180,9 @@ from polylop_influence import apply_influence_patches
 # CUSTOM (Polylop): guard against Mistral error 3240 — an empty model reply
 # after a tool result poisons the agent memory and kills the agent for good.
 from polylop_empty_reply_guard import apply_empty_reply_guard
+# CUSTOM (Polylop): yield report — a finished run must state what it produced,
+# so a silent collapse cannot look like a normal ending (HANDBUCH L-043).
+from polylop_run_report import install_request_counter, write_run_report
 
 
 # Twitter available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
@@ -1585,6 +1588,7 @@ async def main():
     # Both platform simulations run in this process, so one call covers both.
     apply_influence_patches(config)
     apply_empty_reply_guard()
+    install_request_counter()
 
     log_manager.info("Log structure:")
     log_manager.info(f"  - Main log: simulation.log")
@@ -1613,6 +1617,15 @@ async def main():
     total_elapsed = (datetime.now() - start_time).total_seconds()
     log_manager.info("=" * 60)
     log_manager.info(f"Simulation loop completed! Total time: {total_elapsed:.1f}seconds")
+
+    # CUSTOM (Polylop): yield balance for this run, before the wait mode
+    if args.twitter_only:
+        _report_platform = "twitter"
+    elif args.reddit_only:
+        _report_platform = "reddit"
+    else:
+        _report_platform = "parallel"
+    write_run_report(simulation_dir, platform=_report_platform, config=config)
     
     # Whether to enter wait mode
     if wait_for_commands:

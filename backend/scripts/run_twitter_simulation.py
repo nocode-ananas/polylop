@@ -137,6 +137,9 @@ from polylop_influence import apply_influence_patches
 # CUSTOM (Polylop): guard against Mistral error 3240 — an empty model reply
 # after a tool result poisons the agent memory and kills the agent for good.
 from polylop_empty_reply_guard import apply_empty_reply_guard
+# CUSTOM (Polylop): yield report — a finished run must state what it produced,
+# so a silent collapse cannot look like a normal ending (HANDBUCH L-043).
+from polylop_run_report import install_request_counter, write_run_report
 
 
 # IPC-related constants
@@ -584,6 +587,7 @@ class TwitterSimulationRunner:
         # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop
         apply_influence_patches(self.config)
         apply_empty_reply_guard()
+        install_request_counter()
 
         # Create model
         print("\nInitialize LLM model...")
@@ -687,6 +691,10 @@ class TwitterSimulationRunner:
         print(f"\nSimulation loop completed!")
         print(f"  - Total time: {total_elapsed:.1f}seconds")
         print(f"  - Database: {db_path}")
+
+        # CUSTOM (Polylop): yield balance for this run, before the wait mode
+        write_run_report(self.simulation_dir, platform="twitter",
+                         config=self.config)
         
         # Whether to enter wait mode
         if self.wait_for_commands:
