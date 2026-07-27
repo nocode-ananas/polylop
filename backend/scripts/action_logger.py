@@ -132,8 +132,10 @@ class SimulationLogManager:
         self.simulation_dir = simulation_dir
         self.twitter_logger: Optional[PlatformActionLogger] = None
         self.reddit_logger: Optional[PlatformActionLogger] = None
+        # CUSTOM (Polylop, PATCH-012): generic per-platform loggers
+        self._platform_loggers: dict = {}
         self._main_logger: Optional[logging.Logger] = None
-        
+
         # Setup main log
         self._setup_main_logger()
     
@@ -166,16 +168,24 @@ class SimulationLogManager:
         
         self._main_logger.propagate = False
     
+    def get_platform_logger(self, platform: str) -> PlatformActionLogger:
+        """Get the action logger for any platform name
+        (CUSTOM Polylop, PATCH-012 - generic runner)"""
+        if platform not in self._platform_loggers:
+            self._platform_loggers[platform] = PlatformActionLogger(
+                platform, self.simulation_dir)
+        return self._platform_loggers[platform]
+
     def get_twitter_logger(self) -> PlatformActionLogger:
         """Get Twitter platform logger"""
         if self.twitter_logger is None:
-            self.twitter_logger = PlatformActionLogger("twitter", self.simulation_dir)
+            self.twitter_logger = self.get_platform_logger("twitter")
         return self.twitter_logger
-    
+
     def get_reddit_logger(self) -> PlatformActionLogger:
         """Get Reddit platform logger"""
         if self.reddit_logger is None:
-            self.reddit_logger = PlatformActionLogger("reddit", self.simulation_dir)
+            self.reddit_logger = self.get_platform_logger("reddit")
         return self.reddit_logger
     
     def log(self, message: str, level: str = "info"):

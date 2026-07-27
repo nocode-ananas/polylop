@@ -1,9 +1,13 @@
 """
-OASIS dual-platform parallel simulation preset script
-Run Twitter and Reddit simulations simultaneously with the same configuration file
+OASIS multi-platform parallel simulation script
+
+Runs every platform of a simulation in parallel from one configuration file.
+Generic since PATCH-012 (Polylop): the platform list comes from
+config["platforms"] as archetype entries (see polylop_archetypes); configs
+without that key run exactly the inherited Twitter+Reddit pair, unchanged.
 
 Features:
-- Dual-platform (Twitter + Reddit) parallel simulation
+- N-platform parallel simulation with consistent persona identities
 - Keep environment running after simulation completes (enter wait mode)
 - Support Interview commands via IPC
 - Support single Agent interview and batch interview
@@ -14,13 +18,12 @@ Usage:
     python run_parallel_simulation.py --config simulation_config.json --no-wait  # Close immediately after completion
     python run_parallel_simulation.py --config simulation_config.json --twitter-only
     python run_parallel_simulation.py --config simulation_config.json --reddit-only
+    python run_parallel_simulation.py --config simulation_config.json --only reddit,business
 
 Log structure:
     sim_xxx/
-    ├── twitter/
-    │   └── actions.jsonl    # Twitter platform action log
-    ├── reddit/
-    │   └── actions.jsonl    # Reddit platform action log
+    ├── <platform>/
+    │   └── actions.jsonl    # per-platform action log (twitter/, reddit/, ...)
     ├── simulation.log       # Main simulation process log
     └── run_state.json       # Run state (for API queries)
 """
@@ -191,36 +194,14 @@ from polylop_feed_capacity import apply_feed_capacity
 from polylop_posting_rate import apply_posting_rate, select_posters
 # CUSTOM (Polylop): archetype layer - every Platform instance carries an
 # archetype identity; patch modules key their parameters on it instead of
-# guessing from recsys_type (PATCH-011, POL-ARCH01).
-from polylop_archetypes import apply_archetypes
-
-
-# Twitter available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
-TWITTER_ACTIONS = [
-    ActionType.CREATE_POST,
-    ActionType.LIKE_POST,
-    ActionType.REPOST,
-    ActionType.FOLLOW,
-    ActionType.DO_NOTHING,
-    ActionType.QUOTE_POST,
-]
-
-# Reddit available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
-REDDIT_ACTIONS = [
-    ActionType.LIKE_POST,
-    ActionType.DISLIKE_POST,
-    ActionType.CREATE_POST,
-    ActionType.CREATE_COMMENT,
-    ActionType.LIKE_COMMENT,
-    ActionType.DISLIKE_COMMENT,
-    ActionType.SEARCH_POSTS,
-    ActionType.SEARCH_USER,
-    ActionType.TREND,
-    ActionType.REFRESH,
-    ActionType.DO_NOTHING,
-    ActionType.FOLLOW,
-    ActionType.MUTE,
-]
+# guessing from recsys_type (PATCH-011, POL-ARCH01). Since PATCH-012 this
+# runner is generic: the platform list comes from config["platforms"]
+# (archetype entries, see polylop_archetypes), configs without that key run
+# exactly the inherited twitter+reddit pair. Available actions and platform
+# parameters live in the archetype definitions, not here.
+from polylop_archetypes import (apply_archetypes, archetype_actions,
+                                build_platform, entry_knobs,
+                                resolve_platform_entries, ARCHETYPES)
 
 
 # IPC-related constants
@@ -237,42 +218,48 @@ class CommandType:
 
 class ParallelIPCHandler:
     """
-    Dual-platform IPC command handler
-    
-    Manage environments of both platforms, handle Interview commands
+    Multi-platform IPC command handler
+
+    Manages the environments of every platform in the run (generic since
+    PATCH-012), handles Interview commands
     """
-    
+
     def __init__(
         self,
         simulation_dir: str,
-        twitter_env=None,
-        twitter_agent_graph=None,
-        reddit_env=None,
-        reddit_agent_graph=None
+        platforms: Dict[str, Any] = None,
     ):
+        """
+        Args:
+            simulation_dir: Simulation directory
+            platforms: {platform_name: (env, agent_graph)} for every platform
+                that finished with a usable environment
+        """
         self.simulation_dir = simulation_dir
-        self.twitter_env = twitter_env
-        self.twitter_agent_graph = twitter_agent_graph
-        self.reddit_env = reddit_env
-        self.reddit_agent_graph = reddit_agent_graph
-        
+        self.platforms = {name: pair for name, pair in (platforms or {}).items()
+                          if pair[0] is not None}
+
         self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
         self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
         self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
-        
+
         # Ensure directory exists
         os.makedirs(self.commands_dir, exist_ok=True)
         os.makedirs(self.responses_dir, exist_ok=True)
-    
+
     def update_status(self, status: str):
         """Update environment status"""
+        payload = {
+            "status": status,
+            # legacy keys, read by the backend monitor
+            "twitter_available": "twitter" in self.platforms,
+            "reddit_available": "reddit" in self.platforms,
+            # generic availability per platform name (PATCH-012)
+            "platforms": {name: True for name in self.platforms},
+            "timestamp": datetime.now().isoformat()
+        }
         with open(self.status_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "status": status,
-                "twitter_available": self.twitter_env is not None,
-                "reddit_available": self.reddit_env is not None,
-                "timestamp": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     
     def poll_command(self) -> Optional[Dict[str, Any]]:
         """Poll for pending commands"""
@@ -321,19 +308,17 @@ class ParallelIPCHandler:
     def _get_env_and_graph(self, platform: str):
         """
         Get environment and agent_graph for specified platform
-        
+
         Args:
-            platform: Platform name ("twitter" or "reddit")
-            
+            platform: Platform name (any name from the run's platform list)
+
         Returns:
             (env, agent_graph, platform_name) or (None, None, None)
         """
-        if platform == "twitter" and self.twitter_env:
-            return self.twitter_env, self.twitter_agent_graph, "twitter"
-        elif platform == "reddit" and self.reddit_env:
-            return self.reddit_env, self.reddit_agent_graph, "reddit"
-        else:
-            return None, None, None
+        pair = self.platforms.get(platform)
+        if pair:
+            return pair[0], pair[1], platform
+        return None, None, None
     
     async def _interview_single_platform(self, agent_id: int, prompt: str, platform: str) -> Dict[str, Any]:
         """
@@ -380,9 +365,9 @@ class ParallelIPCHandler:
             True means success, False means failure
         """
         # If platform is specified, only interview that platform
-        if platform in ("twitter", "reddit"):
+        if platform is not None:
             result = await self._interview_single_platform(agent_id, prompt, platform)
-            
+
             if "error" in result:
                 self.send_response(command_id, "failed", error=result["error"])
                 print(f"  Interview failed: agent_id={agent_id}, platform={platform}, error={result['error']}")
@@ -391,31 +376,24 @@ class ParallelIPCHandler:
                 self.send_response(command_id, "completed", result=result)
                 print(f"  Interview completed: agent_id={agent_id}, platform={platform}")
                 return True
-        
-        # Platform not specified: interview both platforms simultaneously
-        if not self.twitter_env and not self.reddit_env:
+
+        # Platform not specified: interview every platform simultaneously
+        if not self.platforms:
             self.send_response(command_id, "failed", error="No available simulation environment")
             return False
-        
+
         results = {
             "agent_id": agent_id,
             "prompt": prompt,
             "platforms": {}
         }
         success_count = 0
-        
-        # Interview both platforms in parallel
-        tasks = []
-        platforms_to_interview = []
-        
-        if self.twitter_env:
-            tasks.append(self._interview_single_platform(agent_id, prompt, "twitter"))
-            platforms_to_interview.append("twitter")
-        
-        if self.reddit_env:
-            tasks.append(self._interview_single_platform(agent_id, prompt, "reddit"))
-            platforms_to_interview.append("reddit")
-        
+
+        # Interview all platforms in parallel
+        platforms_to_interview = list(self.platforms)
+        tasks = [self._interview_single_platform(agent_id, prompt, name)
+                 for name in platforms_to_interview]
+
         # Execute in parallel
         platform_results = await asyncio.gather(*tasks)
         
@@ -442,87 +420,53 @@ class ParallelIPCHandler:
             command_id: Command ID
             interviews: [{"agent_id": int, "prompt": str, "platform": str(optional)}, ...]
             platform: default platform (can be overridden by each interview item)
-                - "twitter": Interview only Twitter platform
-                - "reddit": Interview only Reddit platform
-                - None/unspecified: Interview both platforms simultaneously for each Agent
+                - a platform name from the run's platform list: interview only there
+                - None/unspecified: interview every platform simultaneously for each Agent
         """
-        # Group by platform
-        twitter_interviews = []
-        reddit_interviews = []
-        both_platforms_interviews = []  # Need to interview both platforms simultaneously
-        
+        # Group by platform (generic since PATCH-012)
+        per_platform = {name: [] for name in self.platforms}
+
         for interview in interviews:
             item_platform = interview.get("platform", platform)
-            if item_platform == "twitter":
-                twitter_interviews.append(interview)
-            elif item_platform == "reddit":
-                reddit_interviews.append(interview)
+            if item_platform is None:
+                # Platform not specified: interview every platform
+                for name in per_platform:
+                    per_platform[name].append(interview)
+            elif item_platform in per_platform:
+                per_platform[item_platform].append(interview)
             else:
-                # Platform not specified: interview both platforms
-                both_platforms_interviews.append(interview)
-        
-        # Split both_platforms_interviews to two platforms
-        if both_platforms_interviews:
-            if self.twitter_env:
-                twitter_interviews.extend(both_platforms_interviews)
-            if self.reddit_env:
-                reddit_interviews.extend(both_platforms_interviews)
-        
+                print(f"  Warning: unknown platform {item_platform!r} in batch interview")
+
         results = {}
-        
-        # Handle Twitter platform interview
-        if twitter_interviews and self.twitter_env:
+
+        for name, platform_interviews in per_platform.items():
+            if not platform_interviews:
+                continue
+            env, agent_graph, _ = self._get_env_and_graph(name)
             try:
-                twitter_actions = {}
-                for interview in twitter_interviews:
+                platform_actions = {}
+                for interview in platform_interviews:
                     agent_id = interview.get("agent_id")
                     prompt = interview.get("prompt", "")
                     try:
-                        agent = self.twitter_agent_graph.get_agent(agent_id)
-                        twitter_actions[agent] = ManualAction(
+                        agent = agent_graph.get_agent(agent_id)
+                        platform_actions[agent] = ManualAction(
                             action_type=ActionType.INTERVIEW,
                             action_args={"prompt": prompt}
                         )
                     except Exception as e:
-                        print(f"  Warning: Unable to get Twitter Agent {agent_id}: {e}")
-                
-                if twitter_actions:
-                    await self.twitter_env.step(twitter_actions)
-                    
-                    for interview in twitter_interviews:
+                        print(f"  Warning: Unable to get {name} Agent {agent_id}: {e}")
+
+                if platform_actions:
+                    await env.step(platform_actions)
+
+                    for interview in platform_interviews:
                         agent_id = interview.get("agent_id")
-                        result = self._get_interview_result(agent_id, "twitter")
-                        result["platform"] = "twitter"
-                        results[f"twitter_{agent_id}"] = result
+                        result = self._get_interview_result(agent_id, name)
+                        result["platform"] = name
+                        results[f"{name}_{agent_id}"] = result
             except Exception as e:
-                print(f"  Twitter batch Interview failed: {e}")
-        
-        # Handle Reddit platform interview
-        if reddit_interviews and self.reddit_env:
-            try:
-                reddit_actions = {}
-                for interview in reddit_interviews:
-                    agent_id = interview.get("agent_id")
-                    prompt = interview.get("prompt", "")
-                    try:
-                        agent = self.reddit_agent_graph.get_agent(agent_id)
-                        reddit_actions[agent] = ManualAction(
-                            action_type=ActionType.INTERVIEW,
-                            action_args={"prompt": prompt}
-                        )
-                    except Exception as e:
-                        print(f"  Warning: Unable to get Reddit Agent {agent_id}: {e}")
-                
-                if reddit_actions:
-                    await self.reddit_env.step(reddit_actions)
-                    
-                    for interview in reddit_interviews:
-                        agent_id = interview.get("agent_id")
-                        result = self._get_interview_result(agent_id, "reddit")
-                        result["platform"] = "reddit"
-                        results[f"reddit_{agent_id}"] = result
-            except Exception as e:
-                print(f"  Reddit batch Interview failed: {e}")
+                print(f"  {name} batch Interview failed: {e}")
         
         if results:
             self.send_response(command_id, "completed", result={
@@ -1128,279 +1072,108 @@ class PlatformSimulation:
         self.total_actions = 0
 
 
-async def run_twitter_simulation(
-    config: Dict[str, Any], 
+async def run_platform_simulation(
+    entry: Dict[str, Any],
+    config: Dict[str, Any],
     simulation_dir: str,
     action_logger: Optional[PlatformActionLogger] = None,
     main_logger: Optional[SimulationLogManager] = None,
     max_rounds: Optional[int] = None
 ) -> PlatformSimulation:
-    """Run Twitter simulation
-    
+    """Run one platform simulation (generic since PATCH-012).
+
     Args:
+        entry: Platform entry ({"name": ..., "archetype": ...} plus optional
+            knobs, see polylop_archetypes.resolve_platform_entries)
         config: Simulation configuration
         simulation_dir: Simulation directory
-        action_logger: Action logger
+        action_logger: Action logger for this platform
         main_logger: Main logger manager
-        max_rounds: Maximum simulation rounds (optional, used to truncate long simulations)
-        
+        max_rounds: Maximum simulation rounds (optional)
+
     Returns:
         PlatformSimulation: Result object containing env and agent_graph
     """
     result = PlatformSimulation()
-    
+    name = entry["name"]
+    archetype = entry["archetype"]
+    spec = ARCHETYPES[archetype]
+    label = f"[{name.capitalize()}]"
+
     def log_info(msg):
         if main_logger:
-            main_logger.info(f"[Twitter] {msg}")
-        print(f"[Twitter] {msg}")
-    
-    log_info("Initializing...")
-    
-    # Twitter use common LLM configuration
-    model = create_model(config, use_boost=False)
-    
-    # OASIS Twitter uses CSV format
-    profile_path = os.path.join(simulation_dir, "twitter_profiles.csv")
+            main_logger.info(f"{label} {msg}")
+        print(f"{label} {msg}")
+
+    log_info(f"Initializing... (archetype: {archetype})")
+
+    # "boost" = the optional second LLM provider (LLM_BOOST_*), used to spread
+    # concurrent load across providers. Defaults per archetype keep the
+    # pre-PATCH-012 behaviour: forum/reddit boost, micro_broadcast/twitter common.
+    llm_choice = entry.get("llm") or spec["default_llm"]
+    model = create_model(config, use_boost=(llm_choice == "boost"))
+
+    profile_file = entry.get("profiles") or spec["default_profiles"]
+    profile_path = os.path.join(simulation_dir, profile_file)
     if not os.path.exists(profile_path):
         log_info(f"Error: Profile file does not exist: {profile_path}")
         return result
-    
-    result.agent_graph = await generate_twitter_agent_graph(
-        profile_path=profile_path,
-        model=model,
-        available_actions=TWITTER_ACTIONS,
-    )
-    
+
+    # Both builders read the same persona set, just in different formats -
+    # identities stay consistent across every platform of the run.
+    if spec["profile_format"] == "twitter_csv":
+        result.agent_graph = await generate_twitter_agent_graph(
+            profile_path=profile_path,
+            model=model,
+            available_actions=archetype_actions(archetype),
+        )
+    else:
+        result.agent_graph = await generate_reddit_agent_graph(
+            profile_path=profile_path,
+            model=model,
+            available_actions=archetype_actions(archetype),
+        )
+
     # Get Agent real name mapping from config (use entity_name instead of default Agent_X)
     agent_names = get_agent_names_from_config(config)
     # If an agent is not in config, use OASIS default name
     for agent_id, agent in result.agent_graph.get_agents():
         if agent_id not in agent_names:
             agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
-    
-    db_path = os.path.join(simulation_dir, "twitter_simulation.db")
+
+    db_path = os.path.join(simulation_dir, f"{name}_simulation.db")
     if os.path.exists(db_path):
         os.remove(db_path)
-    
+
+    # Explicit construction via the archetype layer: platform parameters come
+    # from the archetype definition, knobs (feed_slots, posting_rate, ...)
+    # from the entry merged over the archetype's legacy config section.
+    platform = build_platform(archetype, db_path,
+                              knobs=entry_knobs(entry, config), label=name)
     result.env = oasis.make(
         agent_graph=result.agent_graph,
-        platform=oasis.DefaultPlatformType.TWITTER,
+        platform=platform,
         database_path=db_path,
         semaphore=30,  # Limit maximum concurrent LLM requests to prevent API overload
     )
-    
+
     await result.env.reset()
     log_info("Environment started")
-    
+
     if action_logger:
         action_logger.log_simulation_start(config)
-    
+
     total_actions = 0
     last_rowid = 0  # Track last processed row in Database (use rowid to avoid created_at format differences)
-    
+
     # Execute initial events
     event_config = config.get("event_config", {})
     initial_posts = event_config.get("initial_posts", [])
-    
+
     # Log round 0 start (initial event phase)
     if action_logger:
         action_logger.log_round_start(0, 0)  # round 0, simulated_hour 0
-    
-    initial_action_count = 0
-    if initial_posts:
-        initial_actions = {}
-        for post in initial_posts:
-            agent_id = post.get("poster_agent_id", 0)
-            content = post.get("content", "")
-            try:
-                agent = result.env.agent_graph.get_agent(agent_id)
-                initial_actions[agent] = ManualAction(
-                    action_type=ActionType.CREATE_POST,
-                    action_args={"content": content}
-                )
-                
-                if action_logger:
-                    action_logger.log_action(
-                        round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
-                    )
-                    total_actions += 1
-                    initial_action_count += 1
-            except Exception:
-                pass
-        
-        if initial_actions:
-            await result.env.step(initial_actions)
-            log_info(f"Published {len(initial_actions)} initial posts")
-    
-    # Log round 0 end
-    if action_logger:
-        action_logger.log_round_end(0, initial_action_count)
-    
-    # Main simulation loop
-    time_config = config.get("time_config", {})
-    total_hours = time_config.get("total_simulation_hours", 72)
-    minutes_per_round = time_config.get("minutes_per_round", 30)
-    total_rounds = (total_hours * 60) // minutes_per_round
-    
-    # If maximum rounds specified, truncate
-    if max_rounds is not None and max_rounds > 0:
-        original_rounds = total_rounds
-        total_rounds = min(total_rounds, max_rounds)
-        if total_rounds < original_rounds:
-            log_info(f"Rounds truncated: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
-    
-    start_time = datetime.now()
-    
-    for round_num in range(total_rounds):
-        # Check if received exit signal
-        if _shutdown_event and _shutdown_event.is_set():
-            if main_logger:
-                main_logger.info(f"Received exit signal，at round {round_num + 1} stop simulation")
-            break
-        
-        simulated_minutes = round_num * minutes_per_round
-        simulated_hour = (simulated_minutes // 60) % 24
-        simulated_day = simulated_minutes // (60 * 24) + 1
-        
-        active_agents = get_active_agents_for_round(
-            result.env, config, simulated_hour, round_num
-        )
-        # CUSTOM (Polylop): draw this round's contributors, scoped to this
-        # platform's channel so the two loops cannot overwrite each other
-        select_posters([aid for aid, _ in active_agents], minutes_per_round,
-                       channel=result.env.channel)
-        
-        # Log round start regardless of active agents
-        if action_logger:
-            action_logger.log_round_start(round_num + 1, simulated_hour)
-        
-        if not active_agents:
-            # Log round end even without active agents (actions_count=0)
-            if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
-            continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
-        # Get actual executed actions from Database and log
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
-        )
-        
-        round_action_count = 0
-        for action_data in actual_actions:
-            if action_logger:
-                action_logger.log_action(
-                    round_num=round_num + 1,
-                    agent_id=action_data['agent_id'],
-                    agent_name=action_data['agent_name'],
-                    action_type=action_data['action_type'],
-                    action_args=action_data['action_args']
-                )
-                total_actions += 1
-                round_action_count += 1
-        
-        if action_logger:
-            action_logger.log_round_end(round_num + 1, round_action_count)
-        
-        if (round_num + 1) % 20 == 0:
-            progress = (round_num + 1) / total_rounds * 100
-            log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
-    
-    # Note: Do not close environment, keep for Interview use
-    
-    if action_logger:
-        action_logger.log_simulation_end(total_rounds, total_actions)
-    
-    result.total_actions = total_actions
-    elapsed = (datetime.now() - start_time).total_seconds()
-    log_info(f"Simulation loop completed! Time taken: {elapsed:.1f}seconds, Total actions: {total_actions}")
-    
-    return result
 
-
-async def run_reddit_simulation(
-    config: Dict[str, Any], 
-    simulation_dir: str,
-    action_logger: Optional[PlatformActionLogger] = None,
-    main_logger: Optional[SimulationLogManager] = None,
-    max_rounds: Optional[int] = None
-) -> PlatformSimulation:
-    """Run Reddit simulation
-    
-    Args:
-        config: Simulation configuration
-        simulation_dir: Simulation directory
-        action_logger: Action logger
-        main_logger: Main logger manager
-        max_rounds: Maximum simulation rounds (optional, used to truncate long simulations)
-        
-    Returns:
-        PlatformSimulation: Result object containing env and agent_graph
-    """
-    result = PlatformSimulation()
-    
-    def log_info(msg):
-        if main_logger:
-            main_logger.info(f"[Reddit] {msg}")
-        print(f"[Reddit] {msg}")
-    
-    log_info("Initializing...")
-    
-    # Reddit use acceleration LLM configuration(if available，otherwise fallback toCommon configuration）
-    model = create_model(config, use_boost=True)
-    
-    profile_path = os.path.join(simulation_dir, "reddit_profiles.json")
-    if not os.path.exists(profile_path):
-        log_info(f"Error: Profile file does not exist: {profile_path}")
-        return result
-    
-    result.agent_graph = await generate_reddit_agent_graph(
-        profile_path=profile_path,
-        model=model,
-        available_actions=REDDIT_ACTIONS,
-    )
-    
-    # Get Agent real name mapping from config (use entity_name instead of default Agent_X)
-    agent_names = get_agent_names_from_config(config)
-    # If an agent is not in config, use OASIS default name
-    for agent_id, agent in result.agent_graph.get_agents():
-        if agent_id not in agent_names:
-            agent_names[agent_id] = getattr(agent, 'name', f'Agent_{agent_id}')
-    
-    db_path = os.path.join(simulation_dir, "reddit_simulation.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    
-    result.env = oasis.make(
-        agent_graph=result.agent_graph,
-        platform=oasis.DefaultPlatformType.REDDIT,
-        database_path=db_path,
-        semaphore=30,  # Limit maximum concurrent LLM requests to prevent API overload
-    )
-    
-    await result.env.reset()
-    log_info("Environment started")
-    
-    if action_logger:
-        action_logger.log_simulation_start(config)
-    
-    total_actions = 0
-    last_rowid = 0  # Track last processed row in Database (use rowid to avoid created_at format differences)
-    
-    # Execute initial events
-    event_config = config.get("event_config", {})
-    initial_posts = event_config.get("initial_posts", [])
-    
-    # Log round 0 start (initial event phase)
-    if action_logger:
-        action_logger.log_round_start(0, 0)  # round 0, simulated_hour 0
-    
     initial_action_count = 0
     if initial_posts:
         initial_actions = {}
@@ -1421,7 +1194,7 @@ async def run_reddit_simulation(
                         action_type=ActionType.CREATE_POST,
                         action_args={"content": content}
                     )
-                
+
                 if action_logger:
                     action_logger.log_action(
                         round_num=0,
@@ -1434,67 +1207,67 @@ async def run_reddit_simulation(
                     initial_action_count += 1
             except Exception:
                 pass
-        
+
         if initial_actions:
             await result.env.step(initial_actions)
             log_info(f"Published {len(initial_actions)} initial posts")
-    
+
     # Log round 0 end
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
-    
+
     # Main simulation loop
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
     minutes_per_round = time_config.get("minutes_per_round", 30)
     total_rounds = (total_hours * 60) // minutes_per_round
-    
+
     # If maximum rounds specified, truncate
     if max_rounds is not None and max_rounds > 0:
         original_rounds = total_rounds
         total_rounds = min(total_rounds, max_rounds)
         if total_rounds < original_rounds:
             log_info(f"Rounds truncated: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
-    
+
     start_time = datetime.now()
-    
+
     for round_num in range(total_rounds):
         # Check if received exit signal
         if _shutdown_event and _shutdown_event.is_set():
             if main_logger:
                 main_logger.info(f"Received exit signal，at round {round_num + 1} stop simulation")
             break
-        
+
         simulated_minutes = round_num * minutes_per_round
         simulated_hour = (simulated_minutes // 60) % 24
         simulated_day = simulated_minutes // (60 * 24) + 1
-        
+
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
         # CUSTOM (Polylop): draw this round's contributors, scoped to this
-        # platform's channel so the two loops cannot overwrite each other
+        # platform's channel so concurrent loops cannot overwrite each other
         select_posters([aid for aid, _ in active_agents], minutes_per_round,
                        channel=result.env.channel)
-        
+
         # Log round start regardless of active agents
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
-        
+
         if not active_agents:
             # Log round end even without active agents (actions_count=0)
             if action_logger:
                 action_logger.log_round_end(round_num + 1, 0)
             continue
-        
+
         actions = {agent: LLMAction() for _, agent in active_agents}
         await result.env.step(actions)
-        
+
         # Get actual executed actions from Database and log
         actual_actions, last_rowid = fetch_new_actions_from_db(
             db_path, last_rowid, agent_names
         )
-        
+
         round_action_count = 0
         for action_data in actual_actions:
             if action_logger:
@@ -1507,23 +1280,23 @@ async def run_reddit_simulation(
                 )
                 total_actions += 1
                 round_action_count += 1
-        
+
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
-        
+
         if (round_num + 1) % 20 == 0:
             progress = (round_num + 1) / total_rounds * 100
             log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
-    
+
     # Note: Do not close environment, keep for Interview use
-    
+
     if action_logger:
         action_logger.log_simulation_end(total_rounds, total_actions)
-    
+
     result.total_actions = total_actions
     elapsed = (datetime.now() - start_time).total_seconds()
     log_info(f"Simulation loop completed! Time taken: {elapsed:.1f}seconds, Total actions: {total_actions}")
-    
+
     return result
 
 
@@ -1544,6 +1317,13 @@ async def main():
         '--reddit-only',
         action='store_true',
         help='Only run Reddit simulation'
+    )
+    parser.add_argument(
+        '--only',
+        type=str,
+        default=None,
+        help='Comma-separated platform names to run (generic form of '
+             '--twitter-only/--reddit-only, works for any configured platform)'
     )
     parser.add_argument(
         '--max-rounds',
@@ -1577,13 +1357,31 @@ async def main():
     
     # Create log manager
     log_manager = SimulationLogManager(simulation_dir)
-    twitter_logger = log_manager.get_twitter_logger()
-    reddit_logger = log_manager.get_reddit_logger()
-    
+
+    # CUSTOM (Polylop, PATCH-012): resolve the run's platform list. Configs
+    # without a "platforms" key run exactly the inherited twitter+reddit pair.
+    entries = resolve_platform_entries(config)
+    only_names = set()
+    if args.twitter_only:
+        only_names.add("twitter")
+    if args.reddit_only:
+        only_names.add("reddit")
+    if args.only:
+        only_names.update(n.strip() for n in args.only.split(",") if n.strip())
+    if only_names:
+        unknown = only_names - {e["name"] for e in entries}
+        if unknown:
+            print(f"Error: requested platforms not in this run's platform "
+                  f"list: {', '.join(sorted(unknown))}")
+            sys.exit(1)
+        entries = [e for e in entries if e["name"] in only_names]
+
     log_manager.info("=" * 60)
-    log_manager.info("OASIS dual-platform parallel simulation")
+    log_manager.info("OASIS multi-platform parallel simulation")
     log_manager.info(f"Configuration file: {args.config}")
     log_manager.info(f"Simulation ID: {config.get('simulation_id', 'unknown')}")
+    log_manager.info("Platforms: " + ", ".join(
+        f"{e['name']} ({e['archetype']})" for e in entries))
     log_manager.info(f"Wait mode: {'Enabled' if wait_for_commands else 'Disabled'}")
     log_manager.info("=" * 60)
     
@@ -1613,40 +1411,32 @@ async def main():
 
     log_manager.info("Log structure:")
     log_manager.info(f"  - Main log: simulation.log")
-    log_manager.info(f"  - Twitter actions: twitter/actions.jsonl")
-    log_manager.info(f"  - Reddit actions: reddit/actions.jsonl")
+    for entry in entries:
+        log_manager.info(f"  - {entry['name']} actions: {entry['name']}/actions.jsonl")
     log_manager.info("=" * 60)
-    
+
     start_time = datetime.now()
-    
-    # Store simulation results of both platforms
-    twitter_result: Optional[PlatformSimulation] = None
-    reddit_result: Optional[PlatformSimulation] = None
-    
-    if args.twitter_only:
-        twitter_result = await run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds)
-    elif args.reddit_only:
-        reddit_result = await run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds)
-    else:
-        # Run in parallel (each platform uses independent logger)
-        results = await asyncio.gather(
-            run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds),
-            run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds),
-        )
-        twitter_result, reddit_result = results
-    
+
+    # Run all platforms in parallel (each with its own logger)
+    results = await asyncio.gather(*[
+        run_platform_simulation(entry, config, simulation_dir,
+                                log_manager.get_platform_logger(entry["name"]),
+                                log_manager, args.max_rounds)
+        for entry in entries
+    ])
+    platform_results = {entry["name"]: result
+                        for entry, result in zip(entries, results)}
+
     total_elapsed = (datetime.now() - start_time).total_seconds()
     log_manager.info("=" * 60)
     log_manager.info(f"Simulation loop completed! Total time: {total_elapsed:.1f}seconds")
 
     # CUSTOM (Polylop): yield balance for this run, before the wait mode
-    if args.twitter_only:
-        _report_platform = "twitter"
-    elif args.reddit_only:
-        _report_platform = "reddit"
-    else:
-        _report_platform = "parallel"
-    write_run_report(simulation_dir, platform=_report_platform, config=config)
+    platform_names = [entry["name"] for entry in entries]
+    write_run_report(simulation_dir,
+                     platform="+".join(platform_names) or "none",
+                     config=config,
+                     platform_names=platform_names)
     
     # Whether to enter wait mode
     if wait_for_commands:
@@ -1659,10 +1449,8 @@ async def main():
         # Create IPC handler
         ipc_handler = ParallelIPCHandler(
             simulation_dir=simulation_dir,
-            twitter_env=twitter_result.env if twitter_result else None,
-            twitter_agent_graph=twitter_result.agent_graph if twitter_result else None,
-            reddit_env=reddit_result.env if reddit_result else None,
-            reddit_agent_graph=reddit_result.agent_graph if reddit_result else None
+            platforms={name: (res.env, res.agent_graph)
+                       for name, res in platform_results.items()}
         )
         ipc_handler.update_status("alive")
         
@@ -1688,21 +1476,18 @@ async def main():
         log_manager.info("\nClose environment...")
         ipc_handler.update_status("stopped")
     
-    # Close environment
-    if twitter_result and twitter_result.env:
-        await twitter_result.env.close()
-        log_manager.info("[Twitter] Environment closed")
-    
-    if reddit_result and reddit_result.env:
-        await reddit_result.env.close()
-        log_manager.info("[Reddit] Environment closed")
-    
+    # Close environments
+    for name, res in platform_results.items():
+        if res and res.env:
+            await res.env.close()
+            log_manager.info(f"[{name.capitalize()}] Environment closed")
+
     log_manager.info("=" * 60)
     log_manager.info(f"All completed!")
     log_manager.info(f"Log files:")
     log_manager.info(f"  - {os.path.join(simulation_dir, 'simulation.log')}")
-    log_manager.info(f"  - {os.path.join(simulation_dir, 'twitter', 'actions.jsonl')}")
-    log_manager.info(f"  - {os.path.join(simulation_dir, 'reddit', 'actions.jsonl')}")
+    for entry in entries:
+        log_manager.info(f"  - {os.path.join(simulation_dir, entry['name'], 'actions.jsonl')}")
     log_manager.info("=" * 60)
 
 

@@ -68,6 +68,11 @@ def _configured_anywhere(config: Dict[str, Any]) -> bool:
         if _valid_slots(section.get("feed_slots"),
                         spec["legacy_config_key"]) is not None:
             return True
+    # PATCH-012: generic platform entries carry their knobs inline
+    for entry in (config or {}).get("platforms") or []:
+        if _valid_slots((entry or {}).get("feed_slots"),
+                        "platforms entry") is not None:
+            return True
     return False
 
 

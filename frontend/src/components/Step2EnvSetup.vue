@@ -265,62 +265,32 @@
             </div>
 
             <!-- Platform configuration -->
+            <!-- CUSTOM (Polylop, PATCH-012): shows the platform archetype list
+                 that the simulation actually consumes. The five pseudo
+                 parameters displayed here before (recency/popularity/relevance
+                 weights, viral threshold, echo chamber strength) were
+                 hard-coded constants that nothing in the backend read. -->
             <div class="config-block">
               <div class="config-block-header">
-                <span class="config-block-title">Recommendation algorithm configuration</span>
+                <span class="config-block-title">Platforms</span>
               </div>
               <div class="platforms-grid">
-                <div v-if="simulationConfig.twitter_config" class="platform-card">
+                <div v-for="entry in platformEntries" :key="entry.name" class="platform-card">
                   <div class="platform-card-header">
-                    <span class="platform-name">Platform 1：Square / Information flow</span>
+                    <span class="platform-name">{{ entry.name }}</span>
                   </div>
                   <div class="platform-params">
                     <div class="param-row">
-                      <span class="param-label">Time weight</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.recency_weight }}</span>
+                      <span class="param-label">Archetype</span>
+                      <span class="param-value">{{ entry.archetype }}</span>
                     </div>
-                    <div class="param-row">
-                      <span class="param-label">Popularity weight</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.popularity_weight }}</span>
+                    <div class="param-row" v-if="entry.feed_slots">
+                      <span class="param-label">Feed slots</span>
+                      <span class="param-value">{{ entry.feed_slots }}</span>
                     </div>
-                    <div class="param-row">
-                      <span class="param-label">Relevance weight</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.relevance_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">Virus threshold</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.viral_threshold }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">Echo chamber strength</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.echo_chamber_strength }}</span>
-                    </div>
-                  </div>
-                </div>
-                <div v-if="simulationConfig.reddit_config" class="platform-card">
-                  <div class="platform-card-header">
-                    <span class="platform-name">Platform 2：Topic / Community</span>
-                  </div>
-                  <div class="platform-params">
-                    <div class="param-row">
-                      <span class="param-label">Time weight</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.recency_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">Popularity weight</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.popularity_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">Relevance weight</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.relevance_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">Virus threshold</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.viral_threshold }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">Echo chamber strength</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.echo_chamber_strength }}</span>
+                    <div class="param-row" v-if="entry.posting_rate">
+                      <span class="param-label">Posting rate</span>
+                      <span class="param-value">enabled</span>
                     </div>
                   </div>
                 </div>
@@ -714,6 +684,21 @@ const displayProfiles = computed(() => {
     return profiles.value
   }
   return profiles.value.slice(0, 6)
+})
+
+// CUSTOM (Polylop, PATCH-012): the platform archetype entries this run will
+// actually simulate. New configs carry a "platforms" list; older configs are
+// derived from the presence of twitter_config/reddit_config.
+const platformEntries = computed(() => {
+  const cfg = simulationConfig.value
+  if (!cfg) return []
+  if (Array.isArray(cfg.platforms) && cfg.platforms.length) {
+    return cfg.platforms
+  }
+  const entries = []
+  if (cfg.twitter_config) entries.push({ name: 'twitter', archetype: 'micro_broadcast' })
+  if (cfg.reddit_config) entries.push({ name: 'reddit', archetype: 'forum' })
+  return entries
 })
 
 // Based onagent_idGet correspondingusername

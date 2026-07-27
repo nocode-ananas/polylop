@@ -257,16 +257,25 @@ def _warnings_for(platforms: Dict[str, Dict[str, Any]],
 
 def write_run_report(simulation_dir: str,
                      platform: str = "reddit",
-                     config: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Write the yield balance for a finished run. Never raises."""
+                     config: Optional[Dict[str, Any]] = None,
+                     platform_names: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    """Write the yield balance for a finished run. Never raises.
+
+    ``platform_names`` (PATCH-012, generic runner) names the platforms of
+    this run explicitly; their databases are ``<name>_simulation.db``.
+    Without it the legacy label mapping applies.
+    """
     if not is_enabled():
         return None
     try:
-        db_names = {
-            "reddit": ["reddit_simulation.db"],
-            "twitter": ["twitter_simulation.db"],
-            "parallel": ["twitter_simulation.db", "reddit_simulation.db"],
-        }.get(platform, ["reddit_simulation.db", "twitter_simulation.db"])
+        if platform_names:
+            db_names = [f"{name}_simulation.db" for name in platform_names]
+        else:
+            db_names = {
+                "reddit": ["reddit_simulation.db"],
+                "twitter": ["twitter_simulation.db"],
+                "parallel": ["twitter_simulation.db", "reddit_simulation.db"],
+            }.get(platform, ["reddit_simulation.db", "twitter_simulation.db"])
 
         platforms = {}
         for db_name in db_names:

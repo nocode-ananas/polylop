@@ -127,19 +127,17 @@ class EventConfig:
 
 @dataclass
 class PlatformConfig:
-    """Platform-specific configuration"""
+    """Platform-specific configuration.
+
+    CUSTOM (Polylop, PATCH-012): the five pseudo parameters this class used
+    to carry (recency/popularity/relevance weights, viral_threshold,
+    echo_chamber_strength) were hard-coded constants that nothing in the
+    backend ever read - the UI displayed them as if they steered the
+    simulation. Removed; a config field only exists once something consumes
+    it. The consumed platform description now lives in the "platforms" list
+    (archetype entries, see backend/scripts/polylop_archetypes.py).
+    """
     platform: str  # twitter or reddit
-
-    # Recommendation algorithm weights
-    recency_weight: float = 0.4  # Time freshness
-    popularity_weight: float = 0.3  # Popularity
-    relevance_weight: float = 0.3  # Relevance
-
-    # Viral threshold (number of interactions before triggering spread)
-    viral_threshold: int = 10
-
-    # Echo chamber effect strength (degree of similar opinion clustering)
-    echo_chamber_strength: float = 0.5
 
 
 @dataclass
@@ -175,6 +173,13 @@ class SimulationParameters:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
         time_dict = asdict(self.time_config)
+        # CUSTOM (Polylop, PATCH-012): the consumed platform description -
+        # archetype entries for the generic runner (polylop_archetypes).
+        platforms = []
+        if self.twitter_config:
+            platforms.append({"name": "twitter", "archetype": "micro_broadcast"})
+        if self.reddit_config:
+            platforms.append({"name": "reddit", "archetype": "forum"})
         return {
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
@@ -183,6 +188,7 @@ class SimulationParameters:
             "time_config": time_dict,
             "agent_configs": [asdict(a) for a in self.agent_configs],
             "event_config": asdict(self.event_config),
+            "platforms": platforms,
             "twitter_config": asdict(self.twitter_config) if self.twitter_config else None,
             "reddit_config": asdict(self.reddit_config) if self.reddit_config else None,
             "llm_model": self.llm_model,
@@ -339,24 +345,10 @@ class SimulationConfigGenerator:
         reddit_config = None
         
         if enable_twitter:
-            twitter_config = PlatformConfig(
-                platform="twitter",
-                recency_weight=0.4,
-                popularity_weight=0.3,
-                relevance_weight=0.3,
-                viral_threshold=10,
-                echo_chamber_strength=0.5
-            )
-        
+            twitter_config = PlatformConfig(platform="twitter")
+
         if enable_reddit:
-            reddit_config = PlatformConfig(
-                platform="reddit",
-                recency_weight=0.3,
-                popularity_weight=0.4,
-                relevance_weight=0.3,
-                viral_threshold=15,
-                echo_chamber_strength=0.6
-            )
+            reddit_config = PlatformConfig(platform="reddit")
         
         # Build final parameters
         params = SimulationParameters(

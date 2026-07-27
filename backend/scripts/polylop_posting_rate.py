@@ -79,6 +79,10 @@ def is_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
         section = config.get(key) or {}
         if section.get("posting_rate"):
             return True
+    # PATCH-012: generic platform entries carry their knobs inline
+    for entry in config.get("platforms") or []:
+        if (entry or {}).get("posting_rate"):
+            return True
     return False
 
 

@@ -214,6 +214,79 @@ def case_influence_compat():
     check(infl.weight_of(0) == 3.0, "influence weights loaded")
 
 
+def case_resolve_entries():
+    """PATCH-012: platform list resolution — legacy fallback and validation."""
+    import polylop_archetypes as arch
+    legacy = arch.resolve_platform_entries({})
+    check(legacy == [{"name": "twitter", "archetype": "micro_broadcast"},
+                     {"name": "reddit", "archetype": "forum"}],
+          "no platforms key -> exactly the inherited pair")
+    entries = arch.resolve_platform_entries(
+        {"platforms": [{"name": "community", "archetype": "forum",
+                        "feed_slots": 2}]})
+    check(entries[0]["feed_slots"] == 2, "entry knobs survive validation")
+    for bad in ({"platforms": [{"name": "x", "archetype": "nope"}]},
+                {"platforms": [{"archetype": "forum"}]},
+                {"platforms": [{"name": "a", "archetype": "forum"},
+                               {"name": "a", "archetype": "forum"}]}):
+        try:
+            arch.resolve_platform_entries(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid platforms accepted: {bad!r}")
+    print("  ok - unknown archetype / missing name / duplicate name raise")
+
+
+def case_build_params_pin():
+    """PATCH-012: build_platform mirrors DefaultPlatformType exactly."""
+    import oasis
+    import polylop_archetypes as arch
+    from oasis.social_agent.agent_graph import AgentGraph
+    arch.apply_archetypes({})
+
+    pinned_attrs = ("recsys_type", "refresh_rec_post_count", "max_rec_post_len",
+                    "following_post_count", "show_score", "allow_self_rating")
+
+    for archetype, default_type in (
+            ("forum", oasis.DefaultPlatformType.REDDIT),
+            ("micro_broadcast", oasis.DefaultPlatformType.TWITTER)):
+        reference_env = oasis.make(agent_graph=AgentGraph(),
+                                   platform=default_type,
+                                   database_path=":memory:")
+        built = arch.build_platform(archetype, ":memory:")
+        for attr in pinned_attrs:
+            ref_val = getattr(reference_env.platform, attr)
+            got_val = getattr(built, attr)
+            check(got_val == ref_val,
+                  f"{archetype}.{attr} == DefaultPlatformType value ({ref_val})")
+
+
+def case_explicit_registration():
+    """PATCH-012: build_platform registers explicitly, knobs from the entry."""
+    import polylop_archetypes as arch
+    import polylop_feed_capacity as cap
+    config = {"platforms": [{"name": "community", "archetype": "forum",
+                             "feed_slots": 3}]}
+    arch.apply_archetypes(config)
+    cap.apply_feed_capacity(config)
+    entry = config["platforms"][0]
+    platform = arch.build_platform("forum", ":memory:",
+                                   knobs=arch.entry_knobs(entry, config),
+                                   label="community")
+    check(arch.archetype_of(platform) == "forum", "explicit archetype set")
+    check(platform.refresh_rec_post_count == 3,
+          "entry feed_slots applied without any legacy config section")
+    merged = arch.entry_knobs({"name": "reddit", "archetype": "forum"},
+                              {"reddit_config": {"feed_slots": 2, "posting_rate": True}})
+    check(merged["feed_slots"] == 2 and merged["posting_rate"] is True,
+          "legacy section knobs survive the merge for legacy entries")
+    overridden = arch.entry_knobs(
+        {"name": "reddit", "archetype": "forum", "feed_slots": 4},
+        {"reddit_config": {"feed_slots": 2}})
+    check(overridden["feed_slots"] == 4, "entry overrides legacy section")
+
+
 CASES = {
     "classify": (case_classify, {}),
     "noop": (case_noop, {}),
@@ -225,6 +298,9 @@ CASES = {
     "idempotent": (case_idempotent, {}),
     "posting_scope": (case_posting_scope, {}),
     "influence_compat": (case_influence_compat, {}),
+    "resolve_entries": (case_resolve_entries, {}),
+    "build_params_pin": (case_build_params_pin, {}),
+    "explicit_registration": (case_explicit_registration, {}),
 }
 
 _POLYLOP_VARS = ("POLYLOP_FEED_CAPACITY", "POLYLOP_FEED_SLOTS",
