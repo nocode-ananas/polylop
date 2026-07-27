@@ -121,11 +121,18 @@ ARCHETYPES["business_network"] = {
     # platforms entry
     "base_recsys": None,
     "legacy_config_key": None,
+    # Platform params identical to forum on purpose: the personalized recsys
+    # paths (twhin-bert / SentenceTransformer) download HF models at runtime
+    # into the ephemeral container FS - not production-ready here. Until an
+    # embedding model is baked into the image, business_network runs on the
+    # proven hot-score recsys; the A/B measurement against forum then
+    # isolates exactly the prompt+action lever.
     "platform_params": {
-        "recsys_type": "twhin-bert",
+        "recsys_type": "reddit",
+        "allow_self_rating": True,
+        "show_score": True,
+        "max_rec_post_len": 100,
         "refresh_rec_post_count": 5,
-        "max_rec_post_len": 10,
-        "following_post_count": 3,
     },
     "profile_format": "reddit_json",
     "default_profiles": "reddit_profiles.json",
