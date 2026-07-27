@@ -344,6 +344,76 @@ def case_business_builder():
     os.unlink(path)
 
 
+def case_newsletter_roles():
+    """PATCH-014: role asymmetry - senders can post, readers structurally
+    cannot; readers do not see other readers' replies in their feed."""
+    import json
+    import tempfile
+    import polylop_archetypes as arch
+
+    arch.apply_archetypes({})
+
+    profiles = [
+        {"username": f"user{i}", "name": f"Person {i}", "bio": "b",
+         "persona": "p", "profession": "job", "gender": "female", "age": 30,
+         "mbti": "INTP", "country": "Germany"}
+        for i in range(3)
+    ]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(profiles, fh)
+        path = fh.name
+
+    from camel.models import ModelFactory
+    from camel.types import ModelPlatformType
+    dummy_model = ModelFactory.create(
+        model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+        model_type="dummy-model", url="http://localhost:9", api_key="dummy")
+
+    # without senders the build must fail loudly
+    try:
+        asyncio.run(arch.build_agent_graph("newsletter", path, dummy_model,
+                                           knobs={}))
+    except ValueError:
+        print("  ok - newsletter without senders fails loudly")
+    else:
+        raise AssertionError("newsletter without senders was accepted")
+
+    graph = asyncio.run(arch.build_agent_graph(
+        "newsletter", path, dummy_model, knobs={"senders": [0]}))
+    agents = {aid: agent for aid, agent in graph.get_agents()}
+
+    sender_tools = {t.func.__name__ for t in agents[0].action_tools}
+    reader_tools = {t.func.__name__ for t in agents[1].action_tools}
+    check("create_post" in sender_tools, "sender can publish issues")
+    check("create_post" not in reader_tools,
+          "reader structurally cannot post (tool subset, not prompt)")
+    check({"like_post", "create_comment"} <= reader_tools,
+          "reader can like and reply")
+    check("author of this newsletter" in agents[0].system_message.content,
+          "sender gets the sender template")
+    check("subscriber of an email newsletter" in agents[1].system_message.content,
+          "reader gets the reader template")
+
+    # readers do not see other readers' replies; the sender does
+    class StubAction:
+        async def refresh(self):
+            return {"success": True, "posts": [
+                {"post_id": 1, "content": "Issue #1",
+                 "comments": [{"content": "private reply"}]}]}
+
+    agents[1].env.action = StubAction()
+    reader_feed = asyncio.run(agents[1].env.get_posts_env())
+    check("private reply" not in reader_feed and "Issue #1" in reader_feed,
+          "reader feed hides replies but shows the issue")
+
+    agents[0].env.action = StubAction()
+    sender_feed = asyncio.run(agents[0].env.get_posts_env())
+    check("private reply" in sender_feed,
+          "sender still sees the replies")
+
+    os.unlink(path)
+
+
 CASES = {
     "classify": (case_classify, {}),
     "noop": (case_noop, {}),
@@ -359,6 +429,7 @@ CASES = {
     "build_params_pin": (case_build_params_pin, {}),
     "explicit_registration": (case_explicit_registration, {}),
     "business_builder": (case_business_builder, {}),
+    "newsletter_roles": (case_newsletter_roles, {}),
 }
 
 _POLYLOP_VARS = ("POLYLOP_FEED_CAPACITY", "POLYLOP_FEED_SLOTS",

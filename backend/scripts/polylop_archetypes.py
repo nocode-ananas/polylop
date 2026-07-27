@@ -147,6 +147,82 @@ ARCHETYPES["business_network"] = {
     "system_template": BUSINESS_NETWORK_TEMPLATE,
 }
 
+# PATCH-014: newsletter — the first archetype with role asymmetry. One or a
+# few sender agents publish issues; every other agent is a reader who cannot
+# post at all (enforced by the per-agent tool subset, not by prompt). Replies
+# are modeled as comments but framed as private mail to the author, and
+# readers do not see other readers' replies in their environment
+# (hide_comments_in_feed) — the closest OASIS gets to a 1->N channel without
+# a real private-message mechanic. No algorithm: every issue reaches every
+# reader (random recsys with capacity far above any realistic issue count).
+NEWSLETTER_SENDER_TEMPLATE = """
+# OBJECTIVE
+You write and publish an email newsletter that goes directly to the inboxes of your subscribers. I'll show you your platform environment. Choose actions from the following functions.
+
+# PLATFORM RULES
+You are the author of this newsletter. Everything you post is an issue that lands unfiltered in every subscriber's inbox under your name - there is no algorithm between you and your readers. Subscribers may reply to you; a reply is a private message to you, not a public discussion. Your readers subscribed because they value your voice: write in it - personal, considered, worth their attention. Every issue costs attention, so never send filler.
+
+# SELF-DESCRIPTION
+Your name is {name}. You work as {profession}.
+{persona}
+You are a {gender}, {age} years old, with an MBTI personality type of {mbti} from {country}.
+
+# RESPONSE METHOD
+Please perform actions by tool calling.
+"""
+
+NEWSLETTER_READER_TEMPLATE = """
+# OBJECTIVE
+You are a subscriber of an email newsletter. New issues appear in your private inbox. I'll show you what arrived. Choose actions from the following functions.
+
+# PLATFORM RULES
+This is your private inbox, not a public feed. The issues you see were written by the author you subscribed to. You cannot publish anything here yourself. You can read, you can like an issue (that quietly tells the author it landed well), and you can write a reply - a private message that only the author will read, like answering an email. People reply in a personal, direct tone, writing to one person rather than performing for an audience.
+
+# SELF-DESCRIPTION
+Your name is {name}. You work as {profession}.
+{persona}
+You are a {gender}, {age} years old, with an MBTI personality type of {mbti} from {country}.
+
+# RESPONSE METHOD
+Please perform actions by tool calling.
+"""
+
+ARCHETYPES["newsletter"] = {
+    # explicit only, like business_network
+    "base_recsys": None,
+    "legacy_config_key": None,
+    "platform_params": {
+        "recsys_type": "random",
+        # capacity far above any realistic issue count: every reader sees
+        # every issue, nothing competes for feed slots
+        "refresh_rec_post_count": 50,
+        "max_rec_post_len": 100,
+        "allow_self_rating": False,
+        "show_score": False,
+    },
+    "profile_format": "reddit_json",
+    "default_profiles": "reddit_profiles.json",
+    "default_llm": "common",
+    # top-level actions unused (roles below define per-agent sets); kept for
+    # archetype_actions() callers as the union of both roles
+    "actions": ["create_post", "create_comment", "like_post", "like_comment",
+                "refresh", "do_nothing"],
+    "roles": {
+        "sender": {
+            "actions": ["create_post", "create_comment", "like_comment",
+                        "refresh", "do_nothing"],
+            "system_template": NEWSLETTER_SENDER_TEMPLATE,
+        },
+        "reader": {
+            "actions": ["like_post", "create_comment", "refresh",
+                        "do_nothing"],
+            "system_template": NEWSLETTER_READER_TEMPLATE,
+            "hide_comments_in_feed": True,
+        },
+    },
+    "default_role": "reader",
+}
+
 _state: Dict[str, Any] = {"applied": False, "config": {}, "pending": None}
 # Strong refs are fine: a handful of Platform instances per process, and the
 # process ends with the simulation. id() stays unique while the ref lives.
@@ -320,15 +396,43 @@ def archetype_actions(archetype_name: str):
     return [ActionType(a) for a in ARCHETYPES[archetype_name]["actions"]]
 
 
-async def build_agent_graph(archetype_name: str, profile_path: str, model):
+def _hide_comments_in_feed(env) -> None:
+    """Per-instance override of SocialEnvironment.get_posts_env that strips
+    the comments from every post before it reaches the agent's prompt
+    (PATCH-014: newsletter readers must not see other readers' replies).
+    The platform DB and traces keep the full data."""
+    import json as _json
+
+    async def get_posts_env() -> str:
+        posts = await env.action.refresh()
+        if posts.get("success"):
+            cleaned = []
+            for post in posts["posts"]:
+                post = dict(post)
+                post.pop("comments", None)
+                cleaned.append(post)
+            return env.posts_env_template.substitute(
+                posts=_json.dumps(cleaned, indent=4))
+        return "After refreshing, there are no existing posts."
+
+    env.get_posts_env = get_posts_env
+
+
+async def build_agent_graph(archetype_name: str, profile_path: str, model,
+                            knobs: Optional[Dict[str, Any]] = None):
     """Polylop graph builder for archetypes with their own system prompt
-    (PATCH-013).
+    (PATCH-013), and per-agent roles (PATCH-014).
 
     Mirrors oasis' generate_reddit_agent_graph, but hands every agent the
     archetype's system template via OASIS' native ``user_info_template``
     hook, with a flat profile dict matching the template placeholders.
     Reads the reddit-format profile JSON — the same persona set every other
     platform of the run uses, so identities stay consistent.
+
+    Archetypes with a ``roles`` block get per-agent action subsets and
+    templates: agent ids listed in the platform entry's ``senders`` knob
+    become the sender role, everyone else the default role. The asymmetry
+    is enforced by the tool subset, not by prompt text.
     """
     import json as _json
 
@@ -336,14 +440,36 @@ async def build_agent_graph(archetype_name: str, profile_path: str, model):
     from oasis.social_agent.agent import SocialAgent
     from oasis.social_agent.agent_graph import AgentGraph
     from oasis.social_platform.config import UserInfo
+    from oasis.social_platform.typing import ActionType
 
     spec = ARCHETYPES[archetype_name]
-    template = TextPrompt(spec["system_template"])
+    roles = spec.get("roles")
+    senders = set()
+    if roles:
+        try:
+            senders = {int(a) for a in (knobs or {}).get("senders", [])}
+        except (TypeError, ValueError):
+            senders = set()
+        if not senders:
+            raise ValueError(
+                f"{MARKER} archetype {archetype_name!r} needs a non-empty "
+                f"'senders' list (agent ids) in its platforms entry")
+
     with open(profile_path, "r", encoding="utf-8") as fh:
         agent_info = _json.load(fh)
 
     agent_graph = AgentGraph()
     for i, item in enumerate(agent_info):
+        if roles:
+            role_name = "sender" if i in senders else spec["default_role"]
+            role = roles[role_name]
+            template = TextPrompt(role["system_template"])
+            actions = [ActionType(a) for a in role["actions"]]
+        else:
+            role = None
+            template = TextPrompt(spec["system_template"])
+            actions = archetype_actions(archetype_name)
+
         profile = {
             "name": item.get("name") or item.get("username") or f"Agent {i}",
             "profession": item.get("profession") or "a professional",
@@ -365,7 +491,9 @@ async def build_agent_graph(archetype_name: str, profile_path: str, model):
             user_info_template=template,
             agent_graph=agent_graph,
             model=model,
-            available_actions=archetype_actions(archetype_name),
+            available_actions=actions,
         )
+        if role and role.get("hide_comments_in_feed"):
+            _hide_comments_in_feed(agent.env)
         agent_graph.add_agent(agent)
     return agent_graph

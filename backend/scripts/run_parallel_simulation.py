@@ -1120,13 +1120,16 @@ async def run_platform_simulation(
         log_info(f"Error: Profile file does not exist: {profile_path}")
         return result
 
+    knobs = entry_knobs(entry, config)
+
     # All builders read the same persona set, just in different formats -
     # identities stay consistent across every platform of the run.
-    # Archetypes with their own system template (PATCH-013) go through the
-    # Polylop builder; the two inherited ones keep OASIS' stock builders.
-    if spec.get("system_template"):
+    # Archetypes with their own system template (PATCH-013) or roles
+    # (PATCH-014) go through the Polylop builder; the two inherited ones
+    # keep OASIS' stock builders.
+    if spec.get("system_template") or spec.get("roles"):
         result.agent_graph = await build_agent_graph(
-            archetype, profile_path, model)
+            archetype, profile_path, model, knobs=knobs)
     elif spec["profile_format"] == "twitter_csv":
         result.agent_graph = await generate_twitter_agent_graph(
             profile_path=profile_path,
@@ -1154,8 +1157,7 @@ async def run_platform_simulation(
     # Explicit construction via the archetype layer: platform parameters come
     # from the archetype definition, knobs (feed_slots, posting_rate, ...)
     # from the entry merged over the archetype's legacy config section.
-    platform = build_platform(archetype, db_path,
-                              knobs=entry_knobs(entry, config), label=name)
+    platform = build_platform(archetype, db_path, knobs=knobs, label=name)
     result.env = oasis.make(
         agent_graph=result.agent_graph,
         platform=platform,
