@@ -27,8 +27,12 @@ environment prompt for that round, telling them to contribute something of
 their own instead of reacting. Soft steering, like the Phase 2a anchors — the
 agent still writes from its persona, and still decides what to say.
 
-The prompt patch is per agent (SocialEnvironment instance carries the agent
-id), so concurrent agents in the same round do not interfere.
+Since PATCH-011 the drawn set is kept per platform, keyed by the platform's
+channel. Before that, parallel runs shared one global set: both platform
+loops overwrote each other's draw, and an agent could be nudged on Twitter
+because its id had been drawn for Reddit (agent ids are the same personas on
+every platform). Callers pass ``channel=env.channel``; calls without a
+channel keep the old global behaviour.
 
 Default is OFF. Enable per run:
 
@@ -52,10 +56,12 @@ NUDGE = ("\nYou have not contributed anything of your own for a while. "
          "raises your own point, question or announcement on this topic, "
          "in your own voice.")
 
+_GLOBAL_KEY = "global"
+
 _state: Dict[str, Any] = {
     "enabled": False,
     "rates": {},        # agent_id -> posts per hour
-    "posters": set(),   # agent ids nudged in the current round
+    "posters": {},      # context key (id(channel) or "global") -> agent ids
     "rounds": 0,
     "nudges": 0,
 }
@@ -105,8 +111,17 @@ def apply_posting_rate(config: Dict[str, Any]) -> bool:
 
         async def to_text_prompt(self, *args, **kwargs):
             prompt = await original(self, *args, **kwargs)
-            agent_id = getattr(getattr(self, "action", None), "agent_id", None)
-            if agent_id is not None and agent_id in _state["posters"]:
+            action = getattr(self, "action", None)
+            agent_id = getattr(action, "agent_id", None)
+            if agent_id is None:
+                return prompt
+            channel = getattr(action, "channel", None)
+            posters = None
+            if channel is not None:
+                posters = _state["posters"].get(id(channel))
+            if posters is None:
+                posters = _state["posters"].get(_GLOBAL_KEY, set())
+            if agent_id in posters:
                 _state["nudges"] += 1
                 return prompt + NUDGE
             return prompt
@@ -122,8 +137,14 @@ def apply_posting_rate(config: Dict[str, Any]) -> bool:
 
 
 def select_posters(active_agent_ids: Iterable[int],
-                   minutes_per_round: int = 60) -> Set[int]:
-    """Draw who contributes in this round, from each agent's own rate."""
+                   minutes_per_round: int = 60,
+                   channel: Any = None) -> Set[int]:
+    """Draw who contributes in this round, from each agent's own rate.
+
+    ``channel`` scopes the draw to one platform (pass ``env.channel``);
+    without it the draw lands in the shared global scope, as before
+    PATCH-011.
+    """
     if not _state["enabled"]:
         return set()
     hours = max(minutes_per_round, 1) / 60.0
@@ -134,7 +155,8 @@ def select_posters(active_agent_ids: Iterable[int],
             continue
         if random.random() < min(1.0, rate * hours):
             chosen.add(agent_id)
-    _state["posters"] = chosen
+    key = _GLOBAL_KEY if channel is None else id(channel)
+    _state["posters"][key] = chosen
     _state["rounds"] += 1
     return chosen
 

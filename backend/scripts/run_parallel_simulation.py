@@ -189,6 +189,10 @@ from polylop_feed_capacity import apply_feed_capacity
 # CUSTOM (Polylop): posting rate - posts_per_hour was generated but never
 # read, so agents only ever reacted (measured 2026-07-27). Opt-in.
 from polylop_posting_rate import apply_posting_rate, select_posters
+# CUSTOM (Polylop): archetype layer - every Platform instance carries an
+# archetype identity; patch modules key their parameters on it instead of
+# guessing from recsys_type (PATCH-011, POL-ARCH01).
+from polylop_archetypes import apply_archetypes
 
 
 # Twitter available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
@@ -1265,8 +1269,10 @@ async def run_twitter_simulation(
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
-        # CUSTOM (Polylop): draw this round's contributors
-        select_posters([aid for aid, _ in active_agents], minutes_per_round)
+        # CUSTOM (Polylop): draw this round's contributors, scoped to this
+        # platform's channel so the two loops cannot overwrite each other
+        select_posters([aid for aid, _ in active_agents], minutes_per_round,
+                       channel=result.env.channel)
         
         # Log round start regardless of active agents
         if action_logger:
@@ -1466,8 +1472,10 @@ async def run_reddit_simulation(
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
-        # CUSTOM (Polylop): draw this round's contributors
-        select_posters([aid for aid, _ in active_agents], minutes_per_round)
+        # CUSTOM (Polylop): draw this round's contributors, scoped to this
+        # platform's channel so the two loops cannot overwrite each other
+        select_posters([aid for aid, _ in active_agents], minutes_per_round,
+                       channel=result.env.channel)
         
         # Log round start regardless of active agents
         if action_logger:
@@ -1596,6 +1604,7 @@ async def main():
 
     # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop.
     # Both platform simulations run in this process, so one call covers both.
+    apply_archetypes(config)
     apply_influence_patches(config)
     apply_empty_reply_guard()
     install_request_counter()

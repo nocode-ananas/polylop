@@ -146,6 +146,10 @@ from polylop_feed_capacity import apply_feed_capacity
 # CUSTOM (Polylop): posting rate - posts_per_hour was generated but never
 # read, so agents only ever reacted (measured 2026-07-27). Opt-in.
 from polylop_posting_rate import apply_posting_rate, select_posters
+# CUSTOM (Polylop): archetype layer - every Platform instance carries an
+# archetype identity; patch modules key their parameters on it instead of
+# guessing from recsys_type (PATCH-011, POL-ARCH01).
+from polylop_archetypes import apply_archetypes
 
 
 # IPC-related constants
@@ -591,6 +595,7 @@ class TwitterSimulationRunner:
         print(f"  - Number of Agents: {len(self.config.get('agent_configs', []))}")
 
         # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop
+        apply_archetypes(self.config)
         apply_influence_patches(self.config)
         apply_empty_reply_guard()
         install_request_counter()
@@ -675,7 +680,8 @@ class TwitterSimulationRunner:
             )
 
             # CUSTOM (Polylop): draw who contributes their own post this round
-            select_posters([aid for aid, _ in active_agents], minutes_per_round)
+            select_posters([aid for aid, _ in active_agents], minutes_per_round,
+                           channel=self.env.channel)
             
             if not active_agents:
                 continue

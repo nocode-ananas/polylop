@@ -21,6 +21,10 @@ Measured on 2026-07-27 with identical real personas, 30 rounds, weights
 So influence weighting (Phase 2b) does not fail in real runs — it simply has
 nothing to decide when the feed shows everything anyway.
 
+Since PATCH-011 the per-platform lookup goes through the archetype registry
+(``polylop_archetypes``) instead of branching on ``recsys_type`` — two
+archetypes may share a base recsys, so the recsys is no longer a usable key.
+
 Default behaviour is unchanged: without configuration this module leaves the
 OASIS values alone. Set the capacity per platform in the simulation config:
 
@@ -38,30 +42,58 @@ logger = logging.getLogger("polylop.feed_capacity")
 
 MARKER = "POLYLOP-FEED-CAPACITY"
 
-_state: Dict[str, Any] = {"applied": False, "reddit": None, "twitter": None,
-                          "changes": []}
+_state: Dict[str, Any] = {"applied": False, "override": None, "changes": []}
 
 
-def _slots_from(config: Dict[str, Any], key: str) -> Optional[int]:
-    section = config.get(key) or {}
-    value = section.get("feed_slots")
+def _valid_slots(value: Any, where: str) -> Optional[int]:
     if value is None:
         return None
     try:
         value = int(value)
     except (TypeError, ValueError):
         logger.warning("%s ignoring non-numeric feed_slots in %s: %r",
-                       MARKER, key, value)
+                       MARKER, where, value)
         return None
     if value < 1:
         logger.warning("%s ignoring feed_slots < 1 in %s: %d",
-                       MARKER, key, value)
+                       MARKER, where, value)
         return None
     return value
 
 
+def _configured_anywhere(config: Dict[str, Any]) -> bool:
+    import polylop_archetypes
+    for spec in polylop_archetypes.ARCHETYPES.values():
+        section = (config or {}).get(spec["legacy_config_key"]) or {}
+        if _valid_slots(section.get("feed_slots"),
+                        spec["legacy_config_key"]) is not None:
+            return True
+    return False
+
+
+def _on_platform(platform, archetype: Optional[str],
+                 knobs: Dict[str, Any]) -> None:
+    wanted = _state["override"]
+    if wanted is None:
+        wanted = _valid_slots(knobs.get("feed_slots"),
+                              archetype or "unclassified")
+    if wanted is None:
+        return
+    previous = platform.refresh_rec_post_count
+    if previous == wanted:
+        return
+    platform.refresh_rec_post_count = wanted
+    label = archetype or str(platform.recsys_type)
+    _state["changes"].append({"archetype": label,
+                              "from": previous, "to": wanted})
+    message = f"{MARKER} {label}: refresh_rec_post_count {previous} -> {wanted}"
+    logger.info(message)
+    print(message)
+
+
 def apply_feed_capacity(config: Dict[str, Any]) -> bool:
-    """Override refresh_rec_post_count per platform. Safe to call twice."""
+    """Override refresh_rec_post_count per platform instance. Safe to call
+    twice. Requires apply_archetypes() to have run (PATCH-011)."""
     if os.environ.get("POLYLOP_FEED_CAPACITY", "").strip().lower() in (
             "off", "0", "false", "no"):
         print(f"{MARKER} disabled via POLYLOP_FEED_CAPACITY")
@@ -78,49 +110,21 @@ def apply_feed_capacity(config: Dict[str, Any]) -> bool:
             logger.warning("%s ignoring POLYLOP_FEED_SLOTS=%r",
                            MARKER, env_slots)
 
-    reddit = override if override is not None else _slots_from(config, "reddit_config")
-    twitter = override if override is not None else _slots_from(config, "twitter_config")
-
-    if reddit is None and twitter is None:
+    if override is None and not _configured_anywhere(config):
         # nothing configured - leave OASIS exactly as it is
         return False
 
-    _state["reddit"], _state["twitter"] = reddit, twitter
+    _state["override"] = override
 
-    import oasis.social_platform.platform as platform_mod
-    from oasis.social_platform.typing import RecsysType
-
-    if getattr(platform_mod.Platform, "_polylop_feed_capacity", False):
-        _state["applied"] = True
-        return True
-
-    original_init = platform_mod.Platform.__init__
-
-    def patched_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        wanted = (reddit if self.recsys_type == RecsysType.REDDIT else twitter)
-        if wanted is None:
-            return
-        previous = self.refresh_rec_post_count
-        if previous == wanted:
-            return
-        self.refresh_rec_post_count = wanted
-        _state["changes"].append({"platform": str(self.recsys_type),
-                                  "from": previous, "to": wanted})
-        message = (f"{MARKER} {self.recsys_type}: refresh_rec_post_count "
-                   f"{previous} -> {wanted}")
-        logger.info(message)
-        print(message)
-
-    platform_mod.Platform.__init__ = patched_init
-    platform_mod.Platform._polylop_feed_capacity = True
+    import polylop_archetypes
+    polylop_archetypes.on_platform(_on_platform)
     _state["applied"] = True
 
-    print(f"{MARKER}-ACTIVE reddit={reddit} twitter={twitter} "
+    print(f"{MARKER}-ACTIVE override={override} "
           "(fewer slots = more competition for reach)")
     return True
 
 
 def capacity_stats() -> Dict[str, Any]:
-    return {"applied": _state["applied"], "reddit": _state["reddit"],
-            "twitter": _state["twitter"], "changes": list(_state["changes"])}
+    return {"applied": _state["applied"], "override": _state["override"],
+            "changes": list(_state["changes"])}
