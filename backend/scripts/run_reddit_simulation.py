@@ -140,6 +140,9 @@ from polylop_empty_reply_guard import apply_empty_reply_guard
 # CUSTOM (Polylop): yield report — a finished run must state what it produced,
 # so a silent collapse cannot look like a normal ending (HANDBUCH L-043).
 from polylop_run_report import install_request_counter, write_run_report
+# CUSTOM (Polylop): feed capacity - influence weighting only bites when
+# there is competition for feed slots (measured 2026-07-27).
+from polylop_feed_capacity import apply_feed_capacity
 
 
 # IPC-related constants
@@ -577,6 +580,7 @@ class RedditSimulationRunner:
         apply_influence_patches(self.config)
         apply_empty_reply_guard()
         install_request_counter()
+        apply_feed_capacity(self.config)
 
         print("\nInitialize LLM model...")
         model = self._create_model()
