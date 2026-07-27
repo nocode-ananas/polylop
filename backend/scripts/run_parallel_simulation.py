@@ -200,8 +200,9 @@ from polylop_posting_rate import apply_posting_rate, select_posters
 # exactly the inherited twitter+reddit pair. Available actions and platform
 # parameters live in the archetype definitions, not here.
 from polylop_archetypes import (apply_archetypes, archetype_actions,
-                                build_platform, entry_knobs,
-                                resolve_platform_entries, ARCHETYPES)
+                                build_agent_graph, build_platform,
+                                entry_knobs, resolve_platform_entries,
+                                ARCHETYPES)
 
 
 # IPC-related constants
@@ -1119,9 +1120,14 @@ async def run_platform_simulation(
         log_info(f"Error: Profile file does not exist: {profile_path}")
         return result
 
-    # Both builders read the same persona set, just in different formats -
+    # All builders read the same persona set, just in different formats -
     # identities stay consistent across every platform of the run.
-    if spec["profile_format"] == "twitter_csv":
+    # Archetypes with their own system template (PATCH-013) go through the
+    # Polylop builder; the two inherited ones keep OASIS' stock builders.
+    if spec.get("system_template"):
+        result.agent_graph = await build_agent_graph(
+            archetype, profile_path, model)
+    elif spec["profile_format"] == "twitter_csv":
         result.agent_graph = await generate_twitter_agent_graph(
             profile_path=profile_path,
             model=model,

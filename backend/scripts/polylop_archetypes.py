@@ -94,6 +94,52 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# PATCH-013: first archetype beyond the two inherited ones. The behaviour
+# lever is threefold: an action subset without public downvotes, a system
+# prompt that puts the agent under real-name professional visibility, and a
+# mildly personalized recsys. Whether the prompt lever actually shifts
+# behaviour is a measured claim (see POL-ARCH01 / changelog), not an assumed
+# one.
+BUSINESS_NETWORK_TEMPLATE = """
+# OBJECTIVE
+You're a member of a professional business network (comparable to LinkedIn), and I'll present you with some posts. After you see the posts, choose some actions from the following functions.
+
+# PLATFORM RULES
+You appear under your real name with your professional role visible to everyone. Your employer, your colleagues, your clients and potential business partners read what you write here. Posts and comments are public, permanent and quotable. Unprofessional behaviour has real career costs. People on this platform therefore write in a professional register: polite, constructive, image-conscious. They avoid insults, rants, slang and oversharing, they highlight their expertise and experience, and they consider how a statement reflects on themselves and their company before publishing it. Disagreement is voiced diplomatically and backed with arguments.
+
+# SELF-DESCRIPTION
+Your name is {name}. You work as {profession}. Your actions should be consistent with your self-description and personality, expressed the way this professional environment demands.
+{persona}
+You are a {gender}, {age} years old, with an MBTI personality type of {mbti} from {country}.
+
+# RESPONSE METHOD
+Please perform actions by tool calling.
+"""
+
+ARCHETYPES["business_network"] = {
+    # never classified implicitly - reachable only through an explicit
+    # platforms entry
+    "base_recsys": None,
+    "legacy_config_key": None,
+    "platform_params": {
+        "recsys_type": "twhin-bert",
+        "refresh_rec_post_count": 5,
+        "max_rec_post_len": 10,
+        "following_post_count": 3,
+    },
+    "profile_format": "reddit_json",
+    "default_profiles": "reddit_profiles.json",
+    "default_llm": "common",
+    # no dislike_*: there is no public downvote on a business network.
+    # repost/quote are the share mechanics; mute exists but no block drama.
+    "actions": [
+        "create_post", "create_comment", "like_post", "like_comment",
+        "repost", "quote_post", "follow", "do_nothing", "search_posts",
+        "search_user", "refresh", "mute",
+    ],
+    "system_template": BUSINESS_NETWORK_TEMPLATE,
+}
+
 _state: Dict[str, Any] = {"applied": False, "config": {}, "pending": None}
 # Strong refs are fine: a handful of Platform instances per process, and the
 # process ends with the simulation. id() stays unique while the ref lives.
@@ -236,7 +282,8 @@ def entry_knobs(entry: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     """Effective knobs for one platform entry: the archetype's legacy config
     section as base (so old configs keep working), the entry itself on top."""
     spec = ARCHETYPES[entry["archetype"]]
-    knobs = dict((config or {}).get(spec["legacy_config_key"]) or {})
+    legacy_key = spec.get("legacy_config_key")
+    knobs = dict((config or {}).get(legacy_key) or {}) if legacy_key else {}
     knobs.update(entry)
     return knobs
 
@@ -264,3 +311,54 @@ def archetype_actions(archetype_name: str):
     import)."""
     from oasis.social_platform.typing import ActionType
     return [ActionType(a) for a in ARCHETYPES[archetype_name]["actions"]]
+
+
+async def build_agent_graph(archetype_name: str, profile_path: str, model):
+    """Polylop graph builder for archetypes with their own system prompt
+    (PATCH-013).
+
+    Mirrors oasis' generate_reddit_agent_graph, but hands every agent the
+    archetype's system template via OASIS' native ``user_info_template``
+    hook, with a flat profile dict matching the template placeholders.
+    Reads the reddit-format profile JSON — the same persona set every other
+    platform of the run uses, so identities stay consistent.
+    """
+    import json as _json
+
+    from camel.prompts import TextPrompt
+    from oasis.social_agent.agent import SocialAgent
+    from oasis.social_agent.agent_graph import AgentGraph
+    from oasis.social_platform.config import UserInfo
+
+    spec = ARCHETYPES[archetype_name]
+    template = TextPrompt(spec["system_template"])
+    with open(profile_path, "r", encoding="utf-8") as fh:
+        agent_info = _json.load(fh)
+
+    agent_graph = AgentGraph()
+    for i, item in enumerate(agent_info):
+        profile = {
+            "name": item.get("name") or item.get("username") or f"Agent {i}",
+            "profession": item.get("profession") or "a professional",
+            "persona": item.get("persona") or "",
+            "gender": item.get("gender") or "person",
+            "age": item.get("age") or "adult",
+            "mbti": item.get("mbti") or "unknown",
+            "country": item.get("country") or "unknown",
+        }
+        user_info = UserInfo(
+            name=item.get("username"),
+            description=item.get("bio"),
+            profile=profile,
+            recsys_type=spec["platform_params"]["recsys_type"],
+        )
+        agent = SocialAgent(
+            agent_id=i,
+            user_info=user_info,
+            user_info_template=template,
+            agent_graph=agent_graph,
+            model=model,
+            available_actions=archetype_actions(archetype_name),
+        )
+        agent_graph.add_agent(agent)
+    return agent_graph

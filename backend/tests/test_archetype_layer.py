@@ -287,6 +287,63 @@ def case_explicit_registration():
     check(overridden["feed_slots"] == 4, "entry overrides legacy section")
 
 
+def case_business_builder():
+    """PATCH-013: the business-network builder produces agents with the
+    archetype's own system prompt and action subset; classification of the
+    inherited archetypes is untouched."""
+    import json
+    import tempfile
+    import polylop_archetypes as arch
+
+    arch.apply_archetypes({})
+
+    # a twhin platform still classifies as micro_broadcast, never business
+    twitter = _platform(**TWITTER_KWARGS)
+    check(arch.archetype_of(twitter) == "micro_broadcast",
+          "twhin recsys still classifies as micro_broadcast")
+
+    profiles = [{
+        "username": "anna_m_82", "name": "Anna Muster", "bio": "PR lead",
+        "persona": "Anna is a seasoned PR strategist who cares about brand "
+                   "reputation.",
+        "profession": "Head of Communications", "gender": "female",
+        "age": 41, "mbti": "ENTJ", "country": "Germany",
+    }]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(profiles, fh)
+        path = fh.name
+
+    from camel.models import ModelFactory
+    from camel.types import ModelPlatformType
+    dummy_model = ModelFactory.create(
+        model_platform=ModelPlatformType.OPENAI_COMPATIBLE_MODEL,
+        model_type="dummy-model", url="http://localhost:9", api_key="dummy")
+
+    graph = asyncio.run(arch.build_agent_graph("business_network", path,
+                                               dummy_model))
+    agents = list(graph.get_agents())
+    check(len(agents) == 1, "one agent built from one profile")
+    agent = agents[0][1]
+
+    system = agent.system_message.content
+    check("professional business network" in system,
+          "system prompt carries the business-network framing")
+    check("Anna Muster" in system and "Head of Communications" in system,
+          "real name and profession are in the system prompt")
+    check("seasoned PR strategist" in system,
+          "persona text survives into the system prompt")
+    check("You're a Reddit user" not in system,
+          "stock Reddit framing is gone")
+
+    tool_names = {t.func.__name__ for t in agent.action_tools}
+    check("dislike_post" not in tool_names and "dislike_comment" not in tool_names,
+          "no public downvote on the business network")
+    check({"repost", "quote_post", "create_comment"} <= tool_names,
+          "share and comment mechanics available")
+
+    os.unlink(path)
+
+
 CASES = {
     "classify": (case_classify, {}),
     "noop": (case_noop, {}),
@@ -301,6 +358,7 @@ CASES = {
     "resolve_entries": (case_resolve_entries, {}),
     "build_params_pin": (case_build_params_pin, {}),
     "explicit_registration": (case_explicit_registration, {}),
+    "business_builder": (case_business_builder, {}),
 }
 
 _POLYLOP_VARS = ("POLYLOP_FEED_CAPACITY", "POLYLOP_FEED_SLOTS",
