@@ -203,6 +203,11 @@ from polylop_archetypes import (apply_archetypes, archetype_actions,
                                 build_agent_graph, build_platform,
                                 entry_knobs, resolve_platform_entries,
                                 ARCHETYPES)
+# CUSTOM (Polylop): campaign waves - timed message injection beyond round 0
+# (PATCH-015, POL-SEQ01). Point sendouts only; duration/pressure mechanics
+# were deliberately rejected for module A.
+from polylop_waves import (parse_waves, check_horizon, due_waves,
+                           record_injection, write_manifest)
 
 
 # IPC-related constants
@@ -1079,7 +1084,8 @@ async def run_platform_simulation(
     simulation_dir: str,
     action_logger: Optional[PlatformActionLogger] = None,
     main_logger: Optional[SimulationLogManager] = None,
-    max_rounds: Optional[int] = None
+    max_rounds: Optional[int] = None,
+    waves: Optional[List[Dict[str, Any]]] = None
 ) -> PlatformSimulation:
     """Run one platform simulation (generic since PATCH-012).
 
@@ -1258,18 +1264,45 @@ async def run_platform_simulation(
         select_posters([aid for aid, _ in active_agents], minutes_per_round,
                        channel=result.env.channel)
 
+        # CUSTOM (Polylop, PATCH-015): campaign waves due in this round
+        round_waves = due_waves(waves or [], name, round_num,
+                                minutes_per_round)
+
         # Log round start regardless of active agents
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
 
-        if not active_agents:
+        if not active_agents and not round_waves:
             # Log round end even without active agents (actions_count=0)
             if action_logger:
                 action_logger.log_round_end(round_num + 1, 0)
             continue
 
         actions = {agent: LLMAction() for _, agent in active_agents}
+        for wave in round_waves:
+            try:
+                wave_agent = result.env.agent_graph.get_agent(
+                    wave["poster_agent_id"])
+            except Exception as e:
+                log_info(f"Warning: wave {wave['wave']}: no agent "
+                         f"{wave['poster_agent_id']}: {e}")
+                continue
+            manual = ManualAction(action_type=ActionType.CREATE_POST,
+                                  action_args={"content": wave["content"]})
+            if wave_agent in actions:
+                existing = actions[wave_agent]
+                actions[wave_agent] = [manual] + (
+                    existing if isinstance(existing, list) else [existing])
+            else:
+                actions[wave_agent] = manual
+
         await result.env.step(actions)
+
+        # The wave post itself is picked up by fetch_new_actions_from_db like
+        # any other CREATE_POST; here we only resolve its post id into the
+        # manifest so later analysis can attribute reactions per wave.
+        for wave in round_waves:
+            record_injection(wave, round_num, db_path)
 
         # Get actual executed actions from Database and log
         actual_actions, last_rowid = fetch_new_actions_from_db(
@@ -1408,6 +1441,13 @@ async def main():
             log_manager.info(f"  - Actual execution rounds: {args.max_rounds} (Truncated)")
     log_manager.info(f"  - Number of Agents: {len(config.get('agent_configs', []))}")
 
+    # CUSTOM (Polylop, PATCH-015): validate campaign waves against this run's
+    # platform list - a mistyped wave must fail loudly, not silently vanish.
+    waves = parse_waves(config, [e["name"] for e in entries])
+    if waves:
+        check_horizon(waves, total_hours)
+        log_manager.info(f"  - Waves: {len(waves)} scheduled")
+
     # CUSTOM (Polylop Phase 2b): feed influence_weight into the OASIS loop.
     # Both platform simulations run in this process, so one call covers both.
     apply_archetypes(config)
@@ -1429,7 +1469,7 @@ async def main():
     results = await asyncio.gather(*[
         run_platform_simulation(entry, config, simulation_dir,
                                 log_manager.get_platform_logger(entry["name"]),
-                                log_manager, args.max_rounds)
+                                log_manager, args.max_rounds, waves=waves)
         for entry in entries
     ])
     platform_results = {entry["name"]: result
@@ -1438,6 +1478,9 @@ async def main():
     total_elapsed = (datetime.now() - start_time).total_seconds()
     log_manager.info("=" * 60)
     log_manager.info(f"Simulation loop completed! Total time: {total_elapsed:.1f}seconds")
+
+    # CUSTOM (Polylop, PATCH-015): wave manifest (wave -> post ids + round)
+    write_manifest(simulation_dir)
 
     # CUSTOM (Polylop): yield balance for this run, before the wait mode
     platform_names = [entry["name"] for entry in entries]
