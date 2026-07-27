@@ -143,6 +143,9 @@ from polylop_run_report import install_request_counter, write_run_report
 # CUSTOM (Polylop): feed capacity - influence weighting only bites when
 # there is competition for feed slots (measured 2026-07-27).
 from polylop_feed_capacity import apply_feed_capacity
+# CUSTOM (Polylop): posting rate - posts_per_hour was generated but never
+# read, so agents only ever reacted (measured 2026-07-27). Opt-in.
+from polylop_posting_rate import apply_posting_rate, select_posters
 
 
 # IPC-related constants
@@ -592,6 +595,7 @@ class TwitterSimulationRunner:
         apply_empty_reply_guard()
         install_request_counter()
         apply_feed_capacity(self.config)
+        apply_posting_rate(self.config)
 
         # Create model
         print("\nInitialize LLM model...")
@@ -669,6 +673,9 @@ class TwitterSimulationRunner:
             active_agents = self._get_active_agents_for_round(
                 self.env, simulated_hour, round_num
             )
+
+            # CUSTOM (Polylop): draw who contributes their own post this round
+            select_posters([aid for aid, _ in active_agents], minutes_per_round)
             
             if not active_agents:
                 continue

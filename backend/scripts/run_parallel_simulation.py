@@ -186,6 +186,9 @@ from polylop_run_report import install_request_counter, write_run_report
 # CUSTOM (Polylop): feed capacity - influence weighting only bites when
 # there is competition for feed slots (measured 2026-07-27).
 from polylop_feed_capacity import apply_feed_capacity
+# CUSTOM (Polylop): posting rate - posts_per_hour was generated but never
+# read, so agents only ever reacted (measured 2026-07-27). Opt-in.
+from polylop_posting_rate import apply_posting_rate, select_posters
 
 
 # Twitter available actions (INTERVIEW not included, INTERVIEW can only be triggered manually via ManualAction)
@@ -1262,6 +1265,8 @@ async def run_twitter_simulation(
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
+        # CUSTOM (Polylop): draw this round's contributors
+        select_posters([aid for aid, _ in active_agents], minutes_per_round)
         
         # Log round start regardless of active agents
         if action_logger:
@@ -1461,6 +1466,8 @@ async def run_reddit_simulation(
         active_agents = get_active_agents_for_round(
             result.env, config, simulated_hour, round_num
         )
+        # CUSTOM (Polylop): draw this round's contributors
+        select_posters([aid for aid, _ in active_agents], minutes_per_round)
         
         # Log round start regardless of active agents
         if action_logger:
@@ -1593,6 +1600,7 @@ async def main():
     apply_empty_reply_guard()
     install_request_counter()
     apply_feed_capacity(config)
+    apply_posting_rate(config)
 
     log_manager.info("Log structure:")
     log_manager.info(f"  - Main log: simulation.log")
