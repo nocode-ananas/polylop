@@ -208,6 +208,8 @@ from polylop_archetypes import (apply_archetypes, archetype_actions,
 # were deliberately rejected for module A.
 from polylop_waves import (parse_waves, check_horizon, due_waves,
                            record_injection, write_manifest)
+# CUSTOM (Polylop): per-wave Verlaufs-/Qualitaets-Report (PATCH-016).
+from polylop_wave_report import wave_report
 
 
 # IPC-related constants
@@ -1481,6 +1483,8 @@ async def main():
 
     # CUSTOM (Polylop, PATCH-015): wave manifest (wave -> post ids + round)
     write_manifest(simulation_dir)
+    # CUSTOM (Polylop, PATCH-016): per-wave report (no-op without waves)
+    wave_report(simulation_dir)
 
     # CUSTOM (Polylop): yield balance for this run, before the wait mode
     platform_names = [entry["name"] for entry in entries]
