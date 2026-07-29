@@ -44,8 +44,25 @@ MARKER = "POLYLOP-WAVE-REPORT"
 REACTION_TYPES = {"like_post", "dislike_post", "create_comment"}
 
 
-def _reaction_rounds(actions_path: str,
-                     post_to_wave: Dict[int, str]) -> Dict[str, Dict[int, int]]:
+def _comment_posts(db_path: str) -> Dict[int, int]:
+    """comment_id -> post_id. The action log's CREATE_COMMENT entries carry
+    only a comment_id (measured on sim_arch015_waves, 2026-07-27) - the post
+    they belong to has to come from the database."""
+    mapping: Dict[int, int] = {}
+    if not os.path.exists(db_path):
+        return mapping
+    conn = sqlite3.connect(db_path)
+    try:
+        for comment_id, post_id in conn.execute(
+                "SELECT comment_id, post_id FROM comment"):
+            mapping[comment_id] = post_id
+    finally:
+        conn.close()
+    return mapping
+
+
+def _reaction_rounds(actions_path: str, post_to_wave: Dict[int, str],
+                     comment_to_post: Dict[int, int]) -> Dict[str, Dict[int, int]]:
     """wave -> {0-based round -> reaction count}, from the action log."""
     rounds: Dict[str, Dict[int, int]] = {}
     if not os.path.exists(actions_path):
@@ -63,6 +80,8 @@ def _reaction_rounds(actions_path: str,
                 continue
             args = entry.get("action_args") or {}
             post_id = args.get("post_id")
+            if post_id is None and action == "create_comment":
+                post_id = comment_to_post.get(args.get("comment_id"))
             wave = post_to_wave.get(post_id)
             if wave is None or "round" not in entry:
                 continue
@@ -116,11 +135,11 @@ def wave_report(simulation_dir: str) -> Optional[Dict[str, Any]]:
         for platform, entries in by_platform.items():
             post_to_wave = {pid: e["wave"] for e in entries
                            for pid in e["post_ids"]}
-            rounds = _reaction_rounds(
-                os.path.join(simulation_dir, platform, "actions.jsonl"),
-                post_to_wave)
             db_path = os.path.join(simulation_dir,
                                    f"{platform}_simulation.db")
+            rounds = _reaction_rounds(
+                os.path.join(simulation_dir, platform, "actions.jsonl"),
+                post_to_wave, _comment_posts(db_path))
             for e in entries:
                 counts = _db_counts(db_path, e["post_ids"])
                 curve = rounds.get(e["wave"], {})

@@ -70,8 +70,10 @@ with open(os.path.join(platform_dir, "actions.jsonl"), "w") as fh:
          "action_args": {"content": "c1", "post_id": 1}},
         {"round": 2, "agent_id": 2, "action_type": "LIKE_POST",
          "action_args": {"post_id": 1}},
+        # real log format: comment entries carry only comment_id, no post_id
+        # (measured on sim_arch015_waves) - the report resolves via the DB
         {"round": 2, "agent_id": 3, "action_type": "CREATE_COMMENT",
-         "action_args": {"post_id": 1, "content": "a"}},
+         "action_args": {"content": "a", "comment_id": 1}},
         {"round": 5, "agent_id": 5, "action_type": "DISLIKE_POST",
          "action_args": {"post_id": 1}},
         {"round": 9, "agent_id": 9, "action_type": "CREATE_POST",
@@ -80,6 +82,8 @@ with open(os.path.join(platform_dir, "actions.jsonl"), "w") as fh:
          "action_args": {"post_id": 10}},
         {"round": 10, "agent_id": 4, "action_type": "LIKE_POST",
          "action_args": {"post_id": 99}},
+        {"round": 11, "agent_id": 6, "action_type": "CREATE_COMMENT",
+         "action_args": {"content": "other", "comment_id": 4}},
         {"event_type": "round_end", "round": 10, "actions_count": 2},
     ]:
         fh.write(json.dumps(entry) + "\n")
@@ -93,7 +97,8 @@ check(w1["comments"] == 2 and w1["likes"] == 2 and w1["dislikes"] == 1,
       "W1 db counts exact (post 10's like does not leak into post 1)")
 check(w1["reactions_total"] == 5, "W1 reactions_total = 5")
 check(w1["reactions_by_round"] == {"1": 2, "4": 1},
-      "W1 round curve normalized to 0-based rounds, CREATE_POST excluded")
+      "W1 round curve normalized to 0-based rounds, CREATE_POST excluded, "
+      "comment resolved via comment_id->post_id from the DB")
 check(w1["first_reaction_round"] == 1 and w1["last_reaction_round"] == 4
       and w1["rounds_with_reactions"] == 2,
       "W1 first/last/active rounds")
